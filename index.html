@@ -92,19 +92,17 @@ const CATS = ["All","Meetings","Shipping","Hiring","Culture","Metrics","Finance"
 const CI = {Meetings:"📅",Shipping:"🚀",Hiring:"👥",Culture:"🎯",Metrics:"📊",Finance:"💰",Engineering:"⚙️",Product:"📦",Other:"🔮"};
 const T="#1B8A9E",GN="#10B981",RD="#EF4444";
 
-// ── Firebase config ──
-// INSTRUCTIONS: Create a free Firebase project at https://console.firebase.google.com
-// 1. Create project → 2. Build → Realtime Database → Create Database (start in test mode)
-// 3. Project Settings → General → Your apps → Web → Register app → copy config below
-const FIREBASE_CONFIG = {
-  // PASTE YOUR FIREBASE CONFIG HERE:
-  // apiKey: "...",
-  // authDomain: "...",
-  // databaseURL: "...",
-  // projectId: "...",
-  // storageBucket: "...",
-  // messagingSenderId: "...",
-  // appId: "..."
+// Your web app's Firebase configuration
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
+const firebaseConfig = {
+  apiKey: "AIzaSyDra0iY_fPwjdgAPWf-JQr8H6ETmUQUaMg",
+  authDomain: "cmdpredict.firebaseapp.com",
+  databaseURL: "https://cmdpredict-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "cmdpredict",
+  storageBucket: "cmdpredict.firebasestorage.app",
+  messagingSenderId: "1084863694257",
+  appId: "1:1084863694257:web:7bbb348da2e5deb5eb2990",
+  measurementId: "G-CTXJ4M7FYC"
 };
 
 let db = null;
