@@ -10,7 +10,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-:root{--t:#1B8A9E;--td:#156F80;--tl:#E8F6F8;--tll:#F3FAFB;--gn:#10B981;--rd:#EF4444;--gd:#F59E0B;--bg:#F5F7FA;--card:#fff;--bdr:#E2E8F0;--tx:#1a2332;--tx2:#64748B;--tx3:#94A3B8}
+:root{--t:#1B8A9E;--td:#156F80;--tl:#E8F6F8;--tll:#F3FAFB;--gn:#10B981;--rd:#EF4444;--bg:#F5F7FA;--card:#fff;--bdr:#E2E8F0;--tx:#1a2332;--tx2:#64748B;--tx3:#94A3B8}
 body{background:var(--bg);font-family:'Source Sans 3','Segoe UI',sans-serif;color:var(--tx);-webkit-font-smoothing:antialiased;min-height:100vh}
 .m{font-family:'IBM Plex Mono',monospace}
 @keyframes fu{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
@@ -47,7 +47,7 @@ footer{border-top:1px solid var(--bdr);padding:12px 22px;margin-top:30px;display
 .market-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}
 .port-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:22px}
 ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#D1D9E6;border-radius:2px}
-@media(max-width:700px){.stats-grid{grid-template-columns:repeat(2,1fr)}.port-grid{grid-template-columns:1fr}.market-grid{grid-template-columns:1fr}.hdr-inner{padding:0 12px;height:48px}main{padding:14px 12px}}
+@media(max-width:700px){.stats-grid{grid-template-columns:repeat(2,1fr)}.port-grid{grid-template-columns:1fr}.market-grid{grid-template-columns:1fr}.hdr-inner{padding:0 12px;height:48px;flex-wrap:wrap;height:auto;padding-top:6px;padding-bottom:6px}main{padding:14px 12px}}
 .setup-screen{min-height:100vh;background:var(--bg);display:flex;align-items:center;justify-content:center}
 .setup-box{background:#fff;border-radius:16px;padding:36px;max-width:440px;width:92%;text-align:center;box-shadow:0 8px 40px rgba(0,0,0,.06);animation:fu .4s ease}
 </style>
@@ -55,76 +55,80 @@ footer{border-top:1px solid var(--bdr);padding:12px 22px;margin-top:30px;display
 <body>
 <div id="app"></div>
 <script>
-// ═══════════════════════════════════════════════════════
-// CMDpredict v2 — shared leaderboard, edit, admin resolve
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════
+// CMDpredict v3 — payout, no jitter, admin users
+// ═══════════════════════════════════════════════════
 
-// ── ADMIN CONFIG ──
-// Add admin usernames here (case-insensitive). These users can resolve/cancel/delete markets.
-const ADMINS = ["quincy m.", "quincy mcdougal", "admin"];
-
-const CATS = ["All","Meetings","Shipping","Hiring","Culture","Metrics","Finance","Engineering","Product","Other"];
-const CI = {Meetings:"📅",Shipping:"🚀",Hiring:"👥",Culture:"🎯",Metrics:"📊",Finance:"💰",Engineering:"⚙️",Product:"📦",Other:"🔮"};
+const ADMINS=["quincy m.","quincy mcdougal","admin"];
+const CATS=["All","Meetings","Shipping","Hiring","Culture","Metrics","Finance","Engineering","Product","Other"];
+const CI={Meetings:"📅",Shipping:"🚀",Hiring:"👥",Culture:"🎯",Metrics:"📊",Finance:"💰",Engineering:"⚙️",Product:"📦",Other:"🔮"};
 const T="#1B8A9E",TD="#156F80",TL="#E8F6F8",GN="#10B981",RD="#EF4444";
 
-const FIREBASE_CONFIG = {
-  apiKey: "AIzaSyDra0iY_fPwjdgAPWf-JQr8H6ETmUQUaMg",
-  authDomain: "cmdpredict.firebaseapp.com",
-  databaseURL: "https://cmdpredict-default-rtdb.europe-west1.firebasedatabase.app",
-  projectId: "cmdpredict",
-  storageBucket: "cmdpredict.firebasestorage.app",
-  messagingSenderId: "1084863694257",
-  appId: "1:1084863694257:web:7bbb348da2e5deb5eb2990",
-  measurementId: "G-CTXJ4M7FYC"
+const FIREBASE_CONFIG={
+  apiKey:"AIzaSyDra0iY_fPwjdgAPWf-JQr8H6ETmUQUaMg",
+  authDomain:"cmdpredict.firebaseapp.com",
+  databaseURL:"https://cmdpredict-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId:"cmdpredict",
+  storageBucket:"cmdpredict.firebasestorage.app",
+  messagingSenderId:"1084863694257",
+  appId:"1:1084863694257:web:7bbb348da2e5deb5eb2990",
+  measurementId:"G-CTXJ4M7FYC"
 };
 
 let db=null,useFirebase=false;
-try{if(FIREBASE_CONFIG.apiKey){firebase.initializeApp(FIREBASE_CONFIG);db=firebase.database();useFirebase=true;}}catch(e){console.warn("FB fail",e)}
+try{if(FIREBASE_CONFIG.apiKey){firebase.initializeApp(FIREBASE_CONFIG);db=firebase.database();useFirebase=true}}catch(e){console.warn("FB fail",e)}
 
 // ── STATE ──
 let S={
-  markets:[],trades:[],portfolio:{balance:10000,positions:[]},
+  markets:[],trades:[],users:{},
+  portfolio:{balance:10000,positions:[]},
   name:localStorage.getItem('cmdp_name')||'',nameIn:'',
   view:'markets',cat:'All',sort:'newest',q:'',
   sel:null,selOc:0,side:'yes',amt:'',
-  creating:false,editing:null,resolving:null,
+  creating:false,editing:null,resolving:null,adminPanel:false,
+  addFundsUser:null,addFundsAmt:'',
   notif:null,
   form:{title:'',desc:'',cat:'Other',end:'',outcomes:['Yes','No']},
   editForm:{outcomes:[]},
-  ready:false
+  ready:false,renderCount:0
 };
 
 function isAdmin(){return ADMINS.some(a=>a.toLowerCase()===S.name.toLowerCase())}
 
-// ── INIT ──
+// ── FIREBASE INIT ──
 async function init(){
   if(useFirebase){
     db.ref('markets').on('value',snap=>{
       const v=snap.val();S.markets=v?Object.values(v):[];
-      if(S.sel){const f=S.markets.find(m=>m.id===S.sel.id);if(f)S.sel=f;}
+      if(S.sel){const f=S.markets.find(m=>m.id===S.sel.id);if(f)S.sel=f}
       render();
     });
     db.ref('trades').on('value',snap=>{
-      const v=snap.val();S.trades=v?Object.values(v):[];
-      render();
+      const v=snap.val();S.trades=v?Object.values(v):[];render();
+    });
+    db.ref('users').on('value',snap=>{
+      const v=snap.val();S.users=v||{};render();
     });
   }else{
-    const rm=localStorage.getItem('cmdp_markets');S.markets=rm?JSON.parse(rm):[];
-    const rt=localStorage.getItem('cmdp_trades');S.trades=rt?JSON.parse(rt):[];
+    S.markets=JSON.parse(localStorage.getItem('cmdp_markets')||'[]');
+    S.trades=JSON.parse(localStorage.getItem('cmdp_trades')||'[]');
+    S.users=JSON.parse(localStorage.getItem('cmdp_users')||'{}');
   }
   const rp=localStorage.getItem('cmdp_portfolio');if(rp)S.portfolio=JSON.parse(rp);
   S.ready=true;render();
 }
 
-function saveMarkets(markets){
-  if(useFirebase){const o={};markets.forEach(m=>{o[m.id]=m});db.ref('markets').set(o);}
-  else localStorage.setItem('cmdp_markets',JSON.stringify(markets));
+function saveMarkets(m){if(useFirebase){const o={};m.forEach(x=>{o[x.id]=x});db.ref('markets').set(o)}else localStorage.setItem('cmdp_markets',JSON.stringify(m))}
+function saveTrade(t){if(useFirebase)db.ref('trades/'+t.id).set(t);else{const a=JSON.parse(localStorage.getItem('cmdp_trades')||'[]');a.push(t);localStorage.setItem('cmdp_trades',JSON.stringify(a))}}
+function savePortfolio(){
+  localStorage.setItem('cmdp_portfolio',JSON.stringify(S.portfolio));
+  // Also save to shared users store so admin can see balances
+  const u=S.users[S.name]||{};
+  u.name=S.name;u.balance=S.portfolio.balance;u.lastSeen=Date.now();
+  if(useFirebase)db.ref('users/'+encodeKey(S.name)).set(u);
+  else{S.users[S.name]=u;localStorage.setItem('cmdp_users',JSON.stringify(S.users))}
 }
-function saveTrade(t){
-  if(useFirebase)db.ref('trades/'+t.id).set(t);
-  else{const arr=JSON.parse(localStorage.getItem('cmdp_trades')||'[]');arr.push(t);localStorage.setItem('cmdp_trades',JSON.stringify(arr))}
-}
-function savePortfolio(){localStorage.setItem('cmdp_portfolio',JSON.stringify(S.portfolio))}
+function encodeKey(k){return k.replace(/[.#$\/\[\]]/g,'_')}
 function flash(msg,type='ok'){S.notif={msg,type};render();setTimeout(()=>{S.notif=null;render()},3200)}
 
 // ── CPMM ──
@@ -141,7 +145,11 @@ function cpmmBuy(market,oi,side,amount){
 }
 
 // ── ACTIONS ──
-function confirmName(){if(!S.nameIn.trim())return;S.name=S.nameIn.trim();localStorage.setItem('cmdp_name',S.name);render()}
+function confirmName(){
+  if(!S.nameIn.trim())return;S.name=S.nameIn.trim();localStorage.setItem('cmdp_name',S.name);
+  savePortfolio(); // register in shared users
+  render();
+}
 
 function createMarket(){
   const f=S.form;
@@ -194,13 +202,50 @@ function saveEdit(){
   S.editing=null;S.sel=u;flash("Market updated!");
 }
 
+// ── RESOLVE WITH PAYOUT ──
 function resolveMarket(winnerIdx){
   const m=S.markets.find(x=>x.id===S.resolving.id);if(!m)return;
   const u=JSON.parse(JSON.stringify(m));
   u.resolved=true;u.winnerIdx=winnerIdx;u.resolvedAt=new Date().toISOString();u.resolvedBy=S.name;
   u.outcomes.forEach((o,i)=>{o.price=i===winnerIdx?1:0;o.history=[...(o.history||[]),o.price]});
   S.markets=S.markets.map(x=>x.id===u.id?u:x);saveMarkets(S.markets);
-  S.resolving=null;S.sel=u;flash(`Resolved: "${u.outcomes[winnerIdx].label}" wins!`);
+
+  // ── PAYOUT: credit local user ──
+  let payout=0;
+  S.portfolio.positions.forEach(p=>{
+    if(p.mid!==u.id)return;
+    const won=(p.side==='yes'&&p.outcomeIdx===winnerIdx)||(p.side==='no'&&p.outcomeIdx!==winnerIdx);
+    if(won)payout+=p.shares; // $1 per share
+    // losers get $0 (they already paid)
+  });
+  if(payout>0){
+    S.portfolio.balance=Math.round((S.portfolio.balance+payout)*100)/100;
+    savePortfolio();
+  }
+
+  // ── PAYOUT: save payout record for other users to pick up ──
+  // Each user checks on load if there are unprocessed payouts for them
+  const payoutsByUser={};
+  S.trades.forEach(t=>{
+    if(t.mid!==u.id)return;
+    const won=(t.side==='yes'&&t.outcomeIdx===winnerIdx)||(t.side==='no'&&t.outcomeIdx!==winnerIdx);
+    if(!payoutsByUser[t.who])payoutsByUser[t.who]=0;
+    if(won)payoutsByUser[t.who]+=t.shares;
+  });
+  // Store payouts in Firebase so other users can claim them
+  if(useFirebase){
+    Object.entries(payoutsByUser).forEach(([who,amt])=>{
+      if(amt>0){
+        db.ref('payouts/'+u.id+'_'+encodeKey(who)).set({
+          mid:u.id,who,amount:Math.round(amt*100)/100,marketTitle:u.title,
+          winner:u.outcomes[winnerIdx].label,ts:Date.now(),claimed:false
+        });
+      }
+    });
+  }
+
+  S.resolving=null;S.sel=u;
+  flash(`Resolved: "${u.outcomes[winnerIdx].label}" wins! Payouts distributed.`);
 }
 
 function cancelMarket(){
@@ -208,13 +253,75 @@ function cancelMarket(){
   const u=JSON.parse(JSON.stringify(m));
   u.resolved=true;u.cancelled=true;u.resolvedAt=new Date().toISOString();u.resolvedBy=S.name;
   S.markets=S.markets.map(x=>x.id===u.id?u:x);saveMarkets(S.markets);
-  S.resolving=null;S.sel=u;flash("Market cancelled.");
+
+  // Refund all trades on this market for local user
+  let refund=0;
+  S.portfolio.positions.forEach(p=>{if(p.mid===u.id)refund+=p.amount||0});
+  if(refund>0){S.portfolio.balance=Math.round((S.portfolio.balance+refund)*100)/100;savePortfolio()}
+
+  // Store refunds for other users
+  if(useFirebase){
+    const refundsByUser={};
+    S.trades.forEach(t=>{if(t.mid!==u.id)return;if(!refundsByUser[t.who])refundsByUser[t.who]=0;refundsByUser[t.who]+=(t.amount||0)});
+    Object.entries(refundsByUser).forEach(([who,amt])=>{
+      if(amt>0)db.ref('payouts/'+u.id+'_'+encodeKey(who)).set({mid:u.id,who,amount:Math.round(amt*100)/100,marketTitle:u.title,winner:'CANCELLED',ts:Date.now(),claimed:false});
+    });
+  }
+  S.resolving=null;S.sel=u;flash("Market cancelled. Refunds distributed.");
 }
 
 function deleteMarket(id){
   S.markets=S.markets.filter(m=>m.id!==id);saveMarkets(S.markets);
   if(useFirebase)db.ref('markets/'+id).remove();
   S.sel=null;S.resolving=null;S.editing=null;flash("Market deleted.");
+}
+
+// ── Check for unclaimed payouts on load ──
+function checkPayouts(){
+  if(!useFirebase)return;
+  db.ref('payouts').once('value',snap=>{
+    const all=snap.val();if(!all)return;
+    let totalPayout=0;
+    Object.entries(all).forEach(([key,p])=>{
+      if(p.who===S.name&&!p.claimed){
+        totalPayout+=p.amount;
+        db.ref('payouts/'+key+'/claimed').set(true);
+      }
+    });
+    if(totalPayout>0){
+      S.portfolio.balance=Math.round((S.portfolio.balance+totalPayout)*100)/100;
+      savePortfolio();
+      flash(`You received $${totalPayout.toFixed(0)} in payouts!`);
+    }
+  });
+}
+
+// ── Admin: add funds to a user ──
+function adminAddFunds(){
+  const amt=parseFloat(S.addFundsAmt);
+  const who=S.addFundsUser;
+  if(!amt||!who){flash("Enter amount","err");return}
+  const key=encodeKey(who);
+  if(useFirebase){
+    db.ref('users/'+key).once('value',snap=>{
+      const u=snap.val()||{name:who,balance:10000};
+      u.balance=Math.round((u.balance+amt)*100)/100;
+      db.ref('users/'+key).set(u);
+      // Also create a payout record so the user picks it up
+      db.ref('payouts/admin_'+Date.now()+'_'+key).set({
+        mid:0,who,amount:amt,marketTitle:'Admin top-up by '+S.name,winner:'TOP-UP',ts:Date.now(),claimed:false
+      });
+      flash(`Added $${amt} to ${who}'s balance`);
+      S.addFundsUser=null;S.addFundsAmt='';render();
+    });
+  }else{
+    const u=S.users[who]||{name:who,balance:10000};
+    u.balance=Math.round((u.balance+amt)*100)/100;
+    S.users[who]=u;localStorage.setItem('cmdp_users',JSON.stringify(S.users));
+    if(who===S.name){S.portfolio.balance=u.balance;savePortfolio()}
+    flash(`Added $${amt} to ${who}'s balance`);
+    S.addFundsUser=null;S.addFundsAmt='';render();
+  }
 }
 
 // ── SPARKLINE ──
@@ -225,7 +332,7 @@ function spark(data,w,h,color){
   return`<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="overflow:visible;flex-shrink:0"><polyline fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" points="${pts}"/><circle cx="${(data.length-1)*sx}" cy="${h-((data[data.length-1]-mn)/rn)*h}" r="2" fill="${color}"/></svg>`;
 }
 
-// ── LEADERBOARD (from shared trades in Firebase) ──
+// ── LEADERBOARD ──
 function getLeaderboard(){
   const map={};
   S.trades.forEach(t=>{
@@ -240,7 +347,10 @@ function getLeaderboard(){
   return Object.values(map).sort((a,b)=>b.pnl-a.pnl);
 }
 
-// ── RENDER ──
+// ═══ RENDER ═══
+// Track which modal is open to avoid re-rendering the trade input
+let _skipFullRender=false;
+
 function render(){
   const app=document.getElementById('app'),s=S;
   if(s.ready&&!s.name){
@@ -250,39 +360,42 @@ function render(){
         <span style="font-weight:700;font-size:17px">CMD<span style="color:${T}">predict</span></span>
       </div>
       <div style="font-size:12.5px;color:var(--tx3);margin-bottom:28px">Internal Prediction Market</div>
-      ${useFirebase?`<div style="font-size:12px;color:var(--gn);margin-bottom:16px"><span class="live-dot"></span>Connected — real-time sync active</div>`:`<div style="background:#FEF3C7;border:1px solid #FDE68A;border-radius:8px;padding:12px;margin-bottom:20px;font-size:12px;color:#92400E;line-height:1.5;text-align:left">⚠️ <strong>Local mode.</strong> Add Firebase config for real-time sync.</div>`}
+      ${useFirebase?`<div style="font-size:12px;color:var(--gn);margin-bottom:16px"><span class="live-dot"></span>Connected — real-time sync active</div>`:`<div style="background:#FEF3C7;border:1px solid #FDE68A;border-radius:8px;padding:12px;margin-bottom:20px;font-size:12px;color:#92400E;line-height:1.5;text-align:left">⚠️ <strong>Local mode.</strong></div>`}
       <div style="width:56px;height:56px;border-radius:50%;background:var(--tl);display:flex;align-items:center;justify-content:center;margin:0 auto 18px;font-size:24px">👤</div>
       <h2 style="font-size:17px;font-weight:700;margin-bottom:5px">Welcome</h2>
-      <p style="font-size:13px;color:var(--tx2);margin-bottom:22px;line-height:1.5">Enter your name to join. Your colleagues will see this on your markets and trades.</p>
+      <p style="font-size:13px;color:var(--tx2);margin-bottom:22px;line-height:1.5">Enter your name to join.</p>
       <input id="name-input" placeholder="Your name (e.g. Quincy M.)" value="${s.nameIn}" style="margin-bottom:12px;text-align:center;font-size:14.5px">
       <button class="btn btn-t" id="name-btn" style="width:100%;padding:11px;font-size:14px">Enter CMDpredict</button>
     </div></div>`;
-    document.getElementById('name-input').addEventListener('input',e=>{S.nameIn=e.target.value});
-    document.getElementById('name-input').addEventListener('keydown',e=>{if(e.key==='Enter')confirmName()});
+    const ni=document.getElementById('name-input');
+    ni.addEventListener('input',e=>{S.nameIn=e.target.value});
+    ni.addEventListener('keydown',e=>{if(e.key==='Enter')confirmName()});
     document.getElementById('name-btn').addEventListener('click',confirmName);
-    document.getElementById('name-input').focus();return;
+    ni.focus();return;
   }
   if(!s.ready){app.innerHTML=`<div class="setup-screen"><div class="m" style="color:${T}">Loading...</div></div>`;return}
 
   const list=s.markets.filter(m=>s.cat==='All'||m.category===s.cat).filter(m=>m.title.toLowerCase().includes(s.q.toLowerCase()))
     .sort((a,b)=>s.sort==='newest'?b.id-a.id:(b.volume||0)-(a.volume||0));
   const tv=s.markets.reduce((x,m)=>x+(m.volume||0),0),tt=s.trades.length,lb=getLeaderboard(),admin=isAdmin();
+  const tabs=['markets','portfolio','leaderboard'];
+  if(admin)tabs.push('admin');
 
   app.innerHTML=`
   ${s.notif?`<div class="notif" style="color:${s.notif.type==='err'?RD:GN};border-color:${s.notif.type==='err'?RD:GN}">${s.notif.msg}</div>`:''}
   <header><div class="hdr-inner">
-    <div style="display:flex;align-items:center;gap:16px">
+    <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
       <div style="display:flex;align-items:center;gap:6px;cursor:pointer" id="logo-click">
         <div style="width:24px;height:24px;border-radius:4px;background:${T};display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:9.5px;color:#fff">CM</div>
         <span style="font-weight:700;font-size:14.5px">CMD<span style="color:${T}">predict</span></span>
       </div>
       <div style="width:1px;height:20px;background:var(--bdr)"></div>
       <div style="display:flex;gap:1px">
-        ${['markets','portfolio','leaderboard'].map(v=>`<button class="tab ${s.view===v?'active':''}" data-view="${v}">${v[0].toUpperCase()+v.slice(1)}</button>`).join('')}
+        ${tabs.map(v=>`<button class="tab ${s.view===v?'active':''}" data-view="${v}">${v==='admin'?'⚙️ Admin':v[0].toUpperCase()+v.slice(1)}</button>`).join('')}
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:10px">
-      ${useFirebase?'<span class="live-dot" title="Real-time sync"></span>':''}
+      ${useFirebase?'<span class="live-dot"></span>':''}
       <span class="m" style="font-size:12.5px;color:${GN};font-weight:600">$${s.portfolio.balance.toLocaleString()}</span>
       <button class="btn btn-t" id="new-market-btn" style="padding:5px 12px;font-size:12px">+ New Market</button>
       <div style="display:flex;align-items:center;gap:5px;padding:3px 8px 3px 3px;border-radius:18px;background:var(--tl)">
@@ -294,97 +407,10 @@ function render(){
   </div></header>
   <main>
 
-  ${s.view==='markets'?`
-    <div class="stats-grid">
-      ${[{l:'Active Markets',v:s.markets.filter(m=>!m.resolved).length,c:T},{l:'Total Volume',v:tv?'$'+(tv/1000).toFixed(1)+'K':'$0',c:GN},{l:'Total Trades',v:tt,c:'#F59E0B'},{l:'Analysts',v:lb.length,c:'#6366F1'}].map((x,i)=>`
-        <div class="stat-card" style="animation:fu .3s ease ${i*.05}s both"><div class="stat-label">${x.l}</div><div class="m" style="font-size:20px;font-weight:700;color:${x.c}">${x.v}</div></div>
-      `).join('')}
-    </div>
-    <div style="display:flex;gap:8px;margin-bottom:12px">
-      <input id="search-input" placeholder="Search markets..." value="${s.q}" style="flex:1">
-      <select id="sort-select" style="width:auto;min-width:115px"><option value="newest" ${s.sort==='newest'?'selected':''}>Newest</option><option value="volume" ${s.sort==='volume'?'selected':''}>Volume</option></select>
-    </div>
-    <div style="display:flex;gap:4px;margin-bottom:18px;flex-wrap:wrap">
-      ${CATS.map(c=>`<button class="cat-btn" data-cat="${c}" style="padding:3px 9px;border-radius:4px;font-size:11px;font-weight:500;cursor:pointer;font-family:'Source Sans 3',sans-serif;border:1px solid ${s.cat===c?T:'var(--bdr)'};background:${s.cat===c?TL:'transparent'};color:${s.cat===c?T:'var(--tx2)'}">${c!=='All'?CI[c]+' ':''}${c}</button>`).join('')}
-    </div>
-    ${list.length===0?`
-      <div style="text-align:center;padding:50px 20px;background:#fff;border:1px solid var(--bdr);border-radius:10px"><div style="font-size:40px;margin-bottom:12px">🏛️</div>
-        <div style="font-size:16px;font-weight:600;margin-bottom:6px">${s.markets.length===0?'No markets yet':'No matches'}</div>
-        <div style="font-size:13px;color:var(--tx2);max-width:360px;margin:0 auto 20px">${s.markets.length===0?'Create the first prediction market.':'Try a different search or category.'}</div>
-        ${s.markets.length===0?'<button class="btn btn-t" id="first-market-btn">Create First Market</button>':''}
-      </div>
-    `:`<div class="market-grid">${list.map((m,i)=>`
-      <div class="card" data-market-id="${m.id}" style="animation-delay:${i*.035}s;${m.resolved?'opacity:.65':''}">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
-          <div style="display:flex;gap:5px;flex-wrap:wrap">
-            <span class="pill" style="background:${TL};color:${T}">${CI[m.category]||'🔮'} ${m.category}</span>
-            <span class="pill" style="background:#F0F4FF;color:#6366F1">${m.outcomes.length} outcomes</span>
-            ${m.resolved?`<span class="${m.cancelled?'cancelled-badge':'resolved-badge'}">${m.cancelled?'CANCELLED':'RESOLVED'}</span>`:''}
-          </div>
-        </div>
-        <div style="font-size:14px;font-weight:600;line-height:1.4;margin-bottom:12px;min-height:36px">${m.title}</div>
-        <div style="display:flex;flex-direction:column;gap:4px;margin-bottom:10px">
-          ${m.outcomes.slice(0,3).map((o,j)=>{const pct=Math.round(o.price*100),w=m.resolved&&m.winnerIdx===j;
-            return`<div style="display:flex;align-items:center;gap:8px">
-              <div style="font-size:12px;color:${w?GN:'#334155'};font-weight:${w?700:500};min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${w?'✓ ':''}${o.label}</div>
-              <div style="flex:1;height:6px;border-radius:3px;background:#EEF2F7;overflow:hidden"><div style="height:100%;border-radius:3px;background:${w?GN:T};width:${pct}%"></div></div>
-              <span class="m" style="font-size:12px;font-weight:700;color:${w?GN:T};min-width:32px;text-align:right">${pct}¢</span>
-            </div>`}).join('')}
-          ${m.outcomes.length>3?`<div style="font-size:11px;color:var(--tx3)">+${m.outcomes.length-3} more</div>`:''}
-        </div>
-        <div style="font-size:10.5px;color:#B0B8C4;display:flex;gap:8px;flex-wrap:wrap">
-          <span>by ${m.creator}</span>${m.volume?`<span>· $${(m.volume/1000).toFixed(1)}K vol</span>`:''}<span>· ${m.traders||0} trades</span><span>· ends ${new Date(m.endDate).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}</span>
-        </div>
-      </div>`).join('')}</div>`}
-  `:''}
-
-  ${s.view==='portfolio'?`
-    <h2 style="font-size:18px;font-weight:700;margin-bottom:18px">Your Portfolio</h2>
-    <div class="port-grid">
-      ${[{l:'Cash Balance',v:'$'+s.portfolio.balance.toLocaleString(),c:GN},{l:'Open Positions',v:s.portfolio.positions.length,c:T},{l:'Markets Traded',v:[...new Set(s.portfolio.positions.map(p=>p.mid))].length,c:'#F59E0B'}].map(x=>`
-        <div class="stat-card"><div class="stat-label">${x.l}</div><div class="m" style="font-size:21px;font-weight:700;color:${x.c}">${x.v}</div></div>`).join('')}
-    </div>
-    ${s.portfolio.positions.length===0?`<div style="text-align:center;padding:40px;color:var(--tx3);background:#fff;border:1px solid var(--bdr);border-radius:10px"><div style="font-size:32px;margin-bottom:8px">📈</div><div style="font-size:14px">No positions yet</div></div>`:`
-      <div style="display:flex;flex-direction:column;gap:8px">
-        ${s.portfolio.positions.map(p=>{
-          const mk=s.markets.find(m=>m.id===p.mid);let cur=p.avg;
-          if(mk&&mk.outcomes[p.outcomeIdx]){const op=mk.outcomes[p.outcomeIdx].price;cur=p.side==='yes'?op:(1-op)}
-          const pnl=(cur-p.avg)*p.shares;
-          return`<div style="background:#fff;border:1px solid var(--bdr);border-radius:8px;padding:13px 15px;display:flex;justify-content:space-between;align-items:center">
-            <div style="min-width:0;flex:1">
-              <div style="font-size:13px;font-weight:600;margin-bottom:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.title}</div>
-              <div style="display:flex;gap:8px;font-size:11px;color:var(--tx3);align-items:center;flex-wrap:wrap">
-                <span class="pill" style="background:${p.side==='yes'?'rgba(16,185,129,.07)':'rgba(239,68,68,.07)'};color:${p.side==='yes'?GN:RD}">${p.side.toUpperCase()}</span>
-                <span style="color:${T};font-weight:600">${p.outcomeLabel}</span><span>${p.shares} @ ${Math.round(p.avg*100)}¢</span>
-              </div>
-            </div>
-            <div style="text-align:right;flex-shrink:0">
-              <div class="m" style="font-size:13.5px;font-weight:700;color:${pnl>=0?GN:RD}">${pnl>=0?'+':''}${pnl.toFixed(0)}</div>
-              <div style="font-size:10px;color:var(--tx3)">now ${Math.round(cur*100)}¢</div>
-            </div></div>`}).join('')}
-      </div>`}
-  `:''}
-
-  ${s.view==='leaderboard'?`
-    <h2 style="font-size:18px;font-weight:700;margin-bottom:18px">Analyst Leaderboard</h2>
-    ${lb.length===0?`<div style="text-align:center;padding:40px;color:var(--tx3);background:#fff;border:1px solid var(--bdr);border-radius:10px"><div style="font-size:32px;margin-bottom:8px">🏆</div><div style="font-size:14px">No trades yet — leaderboard populates as people trade</div></div>`:`
-      <div style="background:#fff;border:1px solid var(--bdr);border-radius:10px;overflow:hidden">
-        <div style="display:grid;grid-template-columns:40px 1fr 90px 80px 70px;padding:10px 14px;border-bottom:1px solid var(--bdr);font-size:9.5px;color:var(--tx3);text-transform:uppercase;letter-spacing:.5px;font-weight:600">
-          <span>#</span><span>Analyst</span><span style="text-align:right">P&amp;L</span><span style="text-align:right">Volume</span><span style="text-align:right">Trades</span>
-        </div>
-        ${lb.map((u,i)=>`
-          <div style="display:grid;grid-template-columns:40px 1fr 90px 80px 70px;padding:12px 14px;border-bottom:1px solid #F1F5F9;align-items:center;${u.name===s.name?'background:'+TL:''}">
-            <span class="m" style="font-weight:700;font-size:13px;color:${i===0?'#F59E0B':i===1?'#94A3B8':i===2?'#CD7F32':'#CBD5E1'}">${i+1}</span>
-            <div style="display:flex;align-items:center;gap:8px">
-              <div style="width:26px;height:26px;border-radius:50%;background:${T};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff">${u.name.slice(0,2).toUpperCase()}</div>
-              <span style="font-weight:600;font-size:13px">${u.name}${u.name===s.name?' (you)':''}</span>
-            </div>
-            <span class="m" style="text-align:right;font-weight:700;font-size:13px;color:${u.pnl>=0?GN:RD}">${u.pnl>=0?'+':''}$${Math.abs(u.pnl).toFixed(0)}</span>
-            <span class="m" style="text-align:right;color:var(--tx2);font-size:12px">$${u.volume.toFixed(0)}</span>
-            <span class="m" style="text-align:right;color:var(--tx2);font-size:12px">${u.trades}</span>
-          </div>`).join('')}
-      </div>`}
-  `:''}
+  ${s.view==='markets'?renderMarkets(list,tv,tt,lb):''}
+  ${s.view==='portfolio'?renderPortfolio():''}
+  ${s.view==='leaderboard'?renderLeaderboard(lb):''}
+  ${s.view==='admin'&&admin?renderAdmin():''}
 
   </main>
   <footer>
@@ -393,56 +419,142 @@ function render(){
     ${useFirebase?'<span>·</span><span><span class="live-dot"></span>Real-time sync</span>':''}
   </footer>`;
 
-  if(s.sel)renderDetail();
-  if(s.creating)renderCreate();
-  if(s.editing)renderEdit();
-  if(s.resolving)renderResolve();
+  if(s.sel)mountDetail();
+  if(s.creating)mountCreate();
+  if(s.editing)mountEdit();
+  if(s.resolving)mountResolve();
   bindEvents();
 }
 
-// ── DETAIL MODAL ──
-function renderDetail(){
+// ── VIEW RENDERERS (return HTML strings) ──
+function renderMarkets(list,tv,tt,lb){
+  const s=S;
+  return`
+    <div class="stats-grid">
+      ${[{l:'Active Markets',v:s.markets.filter(m=>!m.resolved).length,c:T},{l:'Total Volume',v:tv?'$'+(tv/1000).toFixed(1)+'K':'$0',c:GN},{l:'Total Trades',v:tt,c:'#F59E0B'},{l:'Analysts',v:lb.length,c:'#6366F1'}].map((x,i)=>`
+        <div class="stat-card" style="animation:fu .3s ease ${i*.05}s both"><div class="stat-label">${x.l}</div><div class="m" style="font-size:20px;font-weight:700;color:${x.c}">${x.v}</div></div>`).join('')}
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      <input id="search-input" placeholder="Search markets..." value="${s.q}" style="flex:1">
+      <select id="sort-select" style="width:auto;min-width:115px"><option value="newest" ${s.sort==='newest'?'selected':''}>Newest</option><option value="volume" ${s.sort==='volume'?'selected':''}>Volume</option></select>
+    </div>
+    <div style="display:flex;gap:4px;margin-bottom:18px;flex-wrap:wrap">
+      ${CATS.map(c=>`<button class="cat-btn" data-cat="${c}" style="padding:3px 9px;border-radius:4px;font-size:11px;font-weight:500;cursor:pointer;font-family:'Source Sans 3',sans-serif;border:1px solid ${s.cat===c?T:'var(--bdr)'};background:${s.cat===c?TL:'transparent'};color:${s.cat===c?T:'var(--tx2)'}">${c!=='All'?CI[c]+' ':''}${c}</button>`).join('')}
+    </div>
+    ${list.length===0?`<div style="text-align:center;padding:50px 20px;background:#fff;border:1px solid var(--bdr);border-radius:10px"><div style="font-size:40px;margin-bottom:12px">🏛️</div><div style="font-size:16px;font-weight:600;margin-bottom:6px">${s.markets.length===0?'No markets yet':'No matches'}</div><div style="font-size:13px;color:var(--tx2);max-width:360px;margin:0 auto 20px">${s.markets.length===0?'Create the first prediction market.':'Try a different filter.'}</div>${s.markets.length===0?'<button class="btn btn-t" id="first-market-btn">Create First Market</button>':''}</div>`
+    :`<div class="market-grid">${list.map((m,i)=>`
+      <div class="card" data-market-id="${m.id}" style="animation-delay:${i*.035}s;${m.resolved?'opacity:.65':''}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px"><div style="display:flex;gap:5px;flex-wrap:wrap">
+          <span class="pill" style="background:${TL};color:${T}">${CI[m.category]||'🔮'} ${m.category}</span>
+          <span class="pill" style="background:#F0F4FF;color:#6366F1">${m.outcomes.length} outcomes</span>
+          ${m.resolved?`<span class="${m.cancelled?'cancelled-badge':'resolved-badge'}">${m.cancelled?'CANCELLED':'RESOLVED'}</span>`:''}</div></div>
+        <div style="font-size:14px;font-weight:600;line-height:1.4;margin-bottom:12px;min-height:36px">${m.title}</div>
+        <div style="display:flex;flex-direction:column;gap:4px;margin-bottom:10px">
+          ${m.outcomes.slice(0,3).map((o,j)=>{const pct=Math.round(o.price*100),w=m.resolved&&m.winnerIdx===j;
+            return`<div style="display:flex;align-items:center;gap:8px"><div style="font-size:12px;color:${w?GN:'#334155'};font-weight:${w?700:500};min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${w?'✓ ':''}${o.label}</div><div style="flex:1;height:6px;border-radius:3px;background:#EEF2F7;overflow:hidden"><div style="height:100%;border-radius:3px;background:${w?GN:T};width:${pct}%"></div></div><span class="m" style="font-size:12px;font-weight:700;color:${w?GN:T};min-width:32px;text-align:right">${pct}¢</span></div>`}).join('')}
+          ${m.outcomes.length>3?`<div style="font-size:11px;color:var(--tx3)">+${m.outcomes.length-3} more</div>`:''}
+        </div>
+        <div style="font-size:10.5px;color:#B0B8C4;display:flex;gap:8px;flex-wrap:wrap"><span>by ${m.creator}</span>${m.volume?`<span>· $${(m.volume/1000).toFixed(1)}K vol</span>`:''}<span>· ${m.traders||0} trades</span><span>· ends ${new Date(m.endDate).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}</span></div>
+      </div>`).join('')}</div>`}`;
+}
+
+function renderPortfolio(){
+  const s=S;
+  return`<h2 style="font-size:18px;font-weight:700;margin-bottom:18px">Your Portfolio</h2>
+    <div class="port-grid">${[{l:'Cash Balance',v:'$'+s.portfolio.balance.toLocaleString(),c:GN},{l:'Open Positions',v:s.portfolio.positions.length,c:T},{l:'Markets Traded',v:[...new Set(s.portfolio.positions.map(p=>p.mid))].length,c:'#F59E0B'}].map(x=>`<div class="stat-card"><div class="stat-label">${x.l}</div><div class="m" style="font-size:21px;font-weight:700;color:${x.c}">${x.v}</div></div>`).join('')}</div>
+    ${s.portfolio.positions.length===0?`<div style="text-align:center;padding:40px;color:var(--tx3);background:#fff;border:1px solid var(--bdr);border-radius:10px"><div style="font-size:32px;margin-bottom:8px">📈</div><div style="font-size:14px">No positions yet</div></div>`:`
+      <div style="display:flex;flex-direction:column;gap:8px">${s.portfolio.positions.map(p=>{
+        const mk=s.markets.find(m=>m.id===p.mid);let cur=p.avg;
+        if(mk&&mk.outcomes[p.outcomeIdx]){const op=mk.outcomes[p.outcomeIdx].price;cur=p.side==='yes'?op:(1-op)}
+        const pnl=(cur-p.avg)*p.shares;
+        return`<div style="background:#fff;border:1px solid var(--bdr);border-radius:8px;padding:13px 15px;display:flex;justify-content:space-between;align-items:center">
+          <div style="min-width:0;flex:1"><div style="font-size:13px;font-weight:600;margin-bottom:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.title}</div>
+            <div style="display:flex;gap:8px;font-size:11px;color:var(--tx3);align-items:center;flex-wrap:wrap"><span class="pill" style="background:${p.side==='yes'?'rgba(16,185,129,.07)':'rgba(239,68,68,.07)'};color:${p.side==='yes'?GN:RD}">${p.side.toUpperCase()}</span><span style="color:${T};font-weight:600">${p.outcomeLabel}</span><span>${p.shares} @ ${Math.round(p.avg*100)}¢</span></div>
+          </div>
+          <div style="text-align:right;flex-shrink:0"><div class="m" style="font-size:13.5px;font-weight:700;color:${pnl>=0?GN:RD}">${pnl>=0?'+':''}${pnl.toFixed(0)}</div><div style="font-size:10px;color:var(--tx3)">now ${Math.round(cur*100)}¢</div></div>
+        </div>`}).join('')}</div>`}`;
+}
+
+function renderLeaderboard(lb){
+  return`<h2 style="font-size:18px;font-weight:700;margin-bottom:18px">Analyst Leaderboard</h2>
+    ${lb.length===0?`<div style="text-align:center;padding:40px;color:var(--tx3);background:#fff;border:1px solid var(--bdr);border-radius:10px"><div style="font-size:32px;margin-bottom:8px">🏆</div><div style="font-size:14px">No trades yet</div></div>`:`
+      <div style="background:#fff;border:1px solid var(--bdr);border-radius:10px;overflow:hidden">
+        <div style="display:grid;grid-template-columns:40px 1fr 90px 80px 70px;padding:10px 14px;border-bottom:1px solid var(--bdr);font-size:9.5px;color:var(--tx3);text-transform:uppercase;letter-spacing:.5px;font-weight:600"><span>#</span><span>Analyst</span><span style="text-align:right">P&amp;L</span><span style="text-align:right">Volume</span><span style="text-align:right">Trades</span></div>
+        ${lb.map((u,i)=>`<div style="display:grid;grid-template-columns:40px 1fr 90px 80px 70px;padding:12px 14px;border-bottom:1px solid #F1F5F9;align-items:center;${u.name===S.name?'background:'+TL:''}">
+          <span class="m" style="font-weight:700;font-size:13px;color:${i===0?'#F59E0B':i===1?'#94A3B8':i===2?'#CD7F32':'#CBD5E1'}">${i+1}</span>
+          <div style="display:flex;align-items:center;gap:8px"><div style="width:26px;height:26px;border-radius:50%;background:${T};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff">${u.name.slice(0,2).toUpperCase()}</div><span style="font-weight:600;font-size:13px">${u.name}${u.name===S.name?' (you)':''}</span></div>
+          <span class="m" style="text-align:right;font-weight:700;font-size:13px;color:${u.pnl>=0?GN:RD}">${u.pnl>=0?'+':''}$${Math.abs(u.pnl).toFixed(0)}</span>
+          <span class="m" style="text-align:right;color:var(--tx2);font-size:12px">$${u.volume.toFixed(0)}</span>
+          <span class="m" style="text-align:right;color:var(--tx2);font-size:12px">${u.trades}</span>
+        </div>`).join('')}
+      </div>`}`;
+}
+
+function renderAdmin(){
+  const users=Object.values(S.users).sort((a,b)=>(b.balance||0)-(a.balance||0));
+  return`<h2 style="font-size:18px;font-weight:700;margin-bottom:18px">⚙️ Admin Panel</h2>
+    <div class="stats-grid" style="grid-template-columns:repeat(3,1fr)">
+      <div class="stat-card"><div class="stat-label">Registered Users</div><div class="m" style="font-size:20px;font-weight:700;color:${T}">${users.length}</div></div>
+      <div class="stat-card"><div class="stat-label">Total Markets</div><div class="m" style="font-size:20px;font-weight:700;color:${GN}">${S.markets.length}</div></div>
+      <div class="stat-card"><div class="stat-label">Total Trades</div><div class="m" style="font-size:20px;font-weight:700;color:#F59E0B">${S.trades.length}</div></div>
+    </div>
+    <h3 style="font-size:15px;font-weight:700;margin-bottom:12px">All Users</h3>
+    ${users.length===0?`<div style="padding:30px;text-align:center;color:var(--tx3);background:#fff;border:1px solid var(--bdr);border-radius:10px">No users registered yet</div>`:`
+      <div style="background:#fff;border:1px solid var(--bdr);border-radius:10px;overflow:hidden">
+        <div style="display:grid;grid-template-columns:1fr 100px 110px 80px;padding:10px 14px;border-bottom:1px solid var(--bdr);font-size:9.5px;color:var(--tx3);text-transform:uppercase;letter-spacing:.5px;font-weight:600">
+          <span>User</span><span style="text-align:right">Balance</span><span style="text-align:right">Last Active</span><span style="text-align:right">Action</span>
+        </div>
+        ${users.map(u=>`
+          <div style="display:grid;grid-template-columns:1fr 100px 110px 80px;padding:12px 14px;border-bottom:1px solid #F1F5F9;align-items:center">
+            <div style="display:flex;align-items:center;gap:8px">
+              <div style="width:26px;height:26px;border-radius:50%;background:${T};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff">${(u.name||'?').slice(0,2).toUpperCase()}</div>
+              <span style="font-weight:600;font-size:13px">${u.name||'Unknown'}</span>
+            </div>
+            <span class="m" style="text-align:right;font-weight:600;color:${(u.balance||0)>0?GN:RD};font-size:13px">$${(u.balance||0).toLocaleString()}</span>
+            <span style="text-align:right;font-size:11px;color:var(--tx3)">${u.lastSeen?new Date(u.lastSeen).toLocaleDateString('en-GB',{day:'numeric',month:'short'}):'-'}</span>
+            <div style="text-align:right"><button class="btn btn-ghost add-funds-btn" data-user="${u.name}" style="padding:4px 8px;font-size:11px">+ Funds</button></div>
+          </div>
+        `).join('')}
+      </div>
+    `}
+
+    ${S.addFundsUser?`
+      <div style="margin-top:16px;background:#fff;border:1px solid var(--bdr);border-radius:10px;padding:18px">
+        <h4 style="font-size:14px;font-weight:600;margin-bottom:10px">Add funds to: <span style="color:${T}">${S.addFundsUser}</span></h4>
+        <div style="display:flex;gap:8px">
+          <input type="number" id="add-funds-amount" placeholder="Amount ($)" value="${S.addFundsAmt}" style="flex:1">
+          <button class="btn btn-t" id="add-funds-btn">Add Funds</button>
+          <button class="btn btn-ghost" id="cancel-funds-btn">Cancel</button>
+        </div>
+      </div>
+    `:''}`;
+}
+
+// ── MODAL MOUNTS ──
+function mountDetail(){
   const s=S,m=s.sel,admin=isAdmin(),canEdit=admin||m.creator===s.name;
   let html=`<div class="overlay" id="detail-overlay"><div class="modal">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">
-      <div>
-        <div style="display:flex;gap:5px;margin-bottom:5px;flex-wrap:wrap">
-          <span class="pill" style="background:${TL};color:${T}">${CI[m.category]||'🔮'} ${m.category}</span>
-          <span class="pill" style="background:#F0F4FF;color:#6366F1">${m.outcomes.length} contracts</span>
-          ${m.resolved?`<span class="${m.cancelled?'cancelled-badge':'resolved-badge'}">${m.cancelled?'CANCELLED':'RESOLVED'}</span>`:''}
-        </div>
-        <h2 style="font-size:16.5px;font-weight:700;line-height:1.4">${m.title}</h2>
-      </div>
-      <button class="xbtn" id="close-detail">×</button>
-    </div>
+      <div><div style="display:flex;gap:5px;margin-bottom:5px;flex-wrap:wrap">
+        <span class="pill" style="background:${TL};color:${T}">${CI[m.category]||'🔮'} ${m.category}</span>
+        <span class="pill" style="background:#F0F4FF;color:#6366F1">${m.outcomes.length} contracts</span>
+        ${m.resolved?`<span class="${m.cancelled?'cancelled-badge':'resolved-badge'}">${m.cancelled?'CANCELLED':'RESOLVED'}</span>`:''}</div>
+        <h2 style="font-size:16.5px;font-weight:700;line-height:1.4">${m.title}</h2></div>
+      <button class="xbtn" id="close-detail">×</button></div>
     <p style="font-size:13px;color:var(--tx2);line-height:1.5;margin-bottom:14px">${m.description}</p>
-
-    ${canEdit&&!m.resolved?`<div style="display:flex;gap:6px;margin-bottom:14px">
-      <button class="btn btn-ghost" id="edit-market-btn">✏️ Edit Outcomes</button>
-      ${admin?`<button class="btn btn-ghost" id="resolve-market-btn" style="border-color:#F59E0B;color:#B45309">🏁 Resolve</button>`:''}
-    </div>`:''}
-
-    ${m.resolved&&m.resolvedBy?`<div style="font-size:12px;color:${m.cancelled?'#92400E':'#166534'};margin-bottom:12px;padding:8px 12px;background:${m.cancelled?'#FEF3C7':'#F0FDF4'};border-radius:6px;border:1px solid ${m.cancelled?'#FDE68A':'#BBF7D0'}">
-      ${m.cancelled?'Cancelled':'Resolved: <strong>'+m.outcomes[m.winnerIdx]?.label+'</strong> won'} — by ${m.resolvedBy} on ${new Date(m.resolvedAt).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}
-    </div>`:''}
-
+    ${canEdit&&!m.resolved?`<div style="display:flex;gap:6px;margin-bottom:14px"><button class="btn btn-ghost" id="edit-market-btn">✏️ Edit</button>${admin?`<button class="btn btn-ghost" id="resolve-market-btn" style="border-color:#F59E0B;color:#B45309">🏁 Resolve</button>`:''}</div>`:''}
+    ${m.resolved&&m.resolvedBy?`<div style="font-size:12px;color:${m.cancelled?'#92400E':'#166534'};margin-bottom:12px;padding:8px 12px;background:${m.cancelled?'#FEF3C7':'#F0FDF4'};border-radius:6px;border:1px solid ${m.cancelled?'#FDE68A':'#BBF7D0'}">${m.cancelled?'Cancelled':'Resolved: <strong>'+m.outcomes[m.winnerIdx]?.label+'</strong> won'} — by ${m.resolvedBy}</div>`:''}
     <div style="font-size:11px;font-weight:600;color:var(--tx3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Contracts</div>
     <div style="display:flex;flex-direction:column;gap:5px;margin-bottom:16px">
       ${m.outcomes.map((o,j)=>{const pct=Math.round(o.price*100),active=s.selOc===j,w=m.resolved&&m.winnerIdx===j;
         return`<div class="outcome-row" data-idx="${j}" style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;cursor:pointer;border:2px solid ${active&&!m.resolved?T:'transparent'};background:${w?'#F0FDF4':active?'var(--tll)':'#F8FAFC'}">
-          <div style="flex:1;min-width:0">
-            <div style="font-size:13.5px;font-weight:600;margin-bottom:4px;color:${w?GN:'var(--tx)'}">${w?'✓ ':''}${o.label}</div>
-            <div style="height:5px;border-radius:3px;background:#E2E8F0;overflow:hidden"><div style="height:100%;border-radius:3px;background:${w?GN:T};width:${pct}%"></div></div>
-          </div>
+          <div style="flex:1;min-width:0"><div style="font-size:13.5px;font-weight:600;margin-bottom:4px;color:${w?GN:'var(--tx)'}">${w?'✓ ':''}${o.label}</div><div style="height:5px;border-radius:3px;background:#E2E8F0;overflow:hidden"><div style="height:100%;border-radius:3px;background:${w?GN:T};width:${pct}%"></div></div></div>
           <div style="text-align:right;flex-shrink:0"><div class="m" style="font-size:18px;font-weight:700;color:${w?GN:T}">${pct}¢</div></div>
-          ${spark(o.history,56,18,w?GN:T)}
-        </div>`}).join('')}
+          ${spark(o.history,56,18,w?GN:T)}</div>`}).join('')}
     </div>
-
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:16px">
       ${[{l:'Volume',v:m.volume?'$'+(m.volume/1000).toFixed(1)+'K':'$0'},{l:'Liquidity',v:'$'+(m.liquidity/1000).toFixed(1)+'K'},{l:'Trades',v:m.traders||0},{l:'Ends',v:new Date(m.endDate).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}].map(x=>`<div style="text-align:center"><div style="font-size:9px;color:var(--tx3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:2px">${x.l}</div><div class="m" style="font-size:12px;font-weight:600;color:#334155">${x.v}</div></div>`).join('')}
     </div>
-
     ${m.resolved?'':`<div style="background:#F8FAFC;border-radius:8px;padding:16px;border:1px solid var(--bdr)">
       <div style="font-size:12px;font-weight:600;color:#334155;margin-bottom:10px">Trading: <span style="color:${T}">${m.outcomes[s.selOc]?.label||''}</span></div>
       <div style="display:flex;margin-bottom:10px;background:#EEF2F7;border-radius:5px;padding:2px">
@@ -450,28 +562,44 @@ function renderDetail(){
         <button class="side-btn" data-side="no" style="flex:1;padding:7px;border:none;border-radius:4px;cursor:pointer;font-family:'Source Sans 3',sans-serif;font-weight:600;font-size:12.5px;background:${s.side==='no'?RD:'transparent'};color:${s.side==='no'?'#fff':'var(--tx3)'}">Buy NO ${Math.round((1-(m.outcomes[s.selOc]?.price||.5))*100)}¢</button>
       </div>
       <input type="number" id="trade-amount" placeholder="Amount ($)" value="${s.amt}" style="margin-bottom:6px">
-      ${s.amt&&parseFloat(s.amt)>0?(()=>{const oc=m.outcomes[s.selOc],pr=s.side==='yes'?oc.price:(1-oc.price),sh=(parseFloat(s.amt)/pr).toFixed(1),po=(parseFloat(s.amt)/pr).toFixed(0);return`<div style="font-size:12px;color:var(--tx2);margin-bottom:6px;display:flex;justify-content:space-between"><span>${sh} shares @ ${Math.round(pr*100)}¢</span><span style="color:${GN};font-weight:600">Payout: $${po}</span></div>`})():''}
-      <button class="btn" id="trade-btn" style="width:100%;padding:10px;font-size:13.5px;background:${s.side==='yes'?GN:RD};color:#fff">Buy ${s.side.toUpperCase()} ${s.amt?'· $'+s.amt:''}</button>
+      <div id="trade-preview" style="font-size:12px;color:var(--tx2);margin-bottom:6px"></div>
+      <button class="btn" id="trade-btn" style="width:100%;padding:10px;font-size:13.5px;background:${s.side==='yes'?GN:RD};color:#fff">Buy ${s.side.toUpperCase()}</button>
       <div style="font-size:10px;color:var(--tx3);text-align:center;margin-top:6px">Balance: $${s.portfolio.balance.toLocaleString()}</div>
     </div>`}
-    <div style="margin-top:10px;font-size:10.5px;color:var(--tx3);display:flex;justify-content:space-between">
-      <span>by ${m.creator}</span><span>ends ${new Date(m.endDate).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}</span>
-    </div>
+    <div style="margin-top:10px;font-size:10.5px;color:var(--tx3);display:flex;justify-content:space-between"><span>by ${m.creator}</span><span>ends ${new Date(m.endDate).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}</span></div>
   </div></div>`;
   document.getElementById('app').insertAdjacentHTML('beforeend',html);
+
+  // ── FIX JITTER: Update preview WITHOUT re-rendering ──
+  const amtInput=document.getElementById('trade-amount');
+  const preview=document.getElementById('trade-preview');
+  const tradeBtn=document.getElementById('trade-btn');
+  function updatePreview(){
+    const a=parseFloat(amtInput?.value||'0');
+    S.amt=amtInput?.value||'';
+    if(a>0&&m.outcomes[s.selOc]){
+      const pr=s.side==='yes'?m.outcomes[s.selOc].price:(1-m.outcomes[s.selOc].price);
+      const sh=(a/pr).toFixed(1),po=(a/pr).toFixed(0);
+      if(preview)preview.innerHTML=`<div style="display:flex;justify-content:space-between"><span>${sh} shares @ ${Math.round(pr*100)}¢</span><span style="color:${GN};font-weight:600">Payout: $${po}</span></div>`;
+      if(tradeBtn)tradeBtn.textContent=`Buy ${s.side.toUpperCase()} · $${S.amt}`;
+    }else{
+      if(preview)preview.innerHTML='';
+      if(tradeBtn)tradeBtn.textContent=`Buy ${s.side.toUpperCase()}`;
+    }
+  }
+  if(amtInput){amtInput.addEventListener('input',updatePreview);updatePreview()}
+
   document.getElementById('close-detail').onclick=()=>{S.sel=null;render()};
   document.getElementById('detail-overlay').onclick=e=>{if(e.target===e.currentTarget){S.sel=null;render()}};
   document.querySelectorAll('.outcome-row').forEach(el=>{el.onclick=()=>{if(!S.sel.resolved){S.selOc=parseInt(el.dataset.idx);S.side='yes';render()}}});
   document.querySelectorAll('.side-btn').forEach(el=>{el.onclick=e=>{e.stopPropagation();S.side=el.dataset.side;render()}});
-  if(document.getElementById('trade-amount'))document.getElementById('trade-amount').addEventListener('input',e=>{S.amt=e.target.value;render()});
-  if(document.getElementById('trade-btn'))document.getElementById('trade-btn').onclick=trade;
+  if(tradeBtn)tradeBtn.onclick=trade;
   if(document.getElementById('edit-market-btn'))document.getElementById('edit-market-btn').onclick=()=>{
     S.editing=S.sel;S.editForm={title:S.sel.title,desc:S.sel.description,end:S.sel.endDate,outcomes:S.sel.outcomes.map(o=>o.label)};render()};
   if(document.getElementById('resolve-market-btn'))document.getElementById('resolve-market-btn').onclick=()=>{S.resolving=S.sel;render()};
 }
 
-// ── CREATE MODAL ──
-function renderCreate(){
+function mountCreate(){
   const f=S.form;
   let html=`<div class="overlay" id="create-overlay"><div class="modal">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px"><h2 style="font-size:16.5px;font-weight:700">Create a New Market</h2><button class="xbtn" id="close-create">×</button></div>
@@ -479,16 +607,12 @@ function renderCreate(){
     <div style="display:flex;flex-direction:column;gap:12px">
       <div><label style="font-size:11px;color:var(--tx2);margin-bottom:4px;display:block;font-weight:600">Question *</label><input id="f-title" placeholder="e.g. How many OKR meetings in Q3?" value="${f.title}"></div>
       <div><label style="font-size:11px;color:var(--tx2);margin-bottom:4px;display:block;font-weight:600">Resolution Criteria</label><textarea id="f-desc" rows="2" placeholder="How does this resolve?" style="resize:vertical">${f.desc}</textarea></div>
-      <div><label style="font-size:11px;color:var(--tx2);margin-bottom:6px;display:block;font-weight:600">Outcome Contracts *</label>
-        <div style="display:flex;flex-direction:column;gap:5px">
-          ${f.outcomes.map((o,i)=>`<div style="display:flex;gap:6px;align-items:center"><span class="m" style="font-size:10.5px;color:var(--tx3);min-width:18px">${i+1}.</span><input class="outcome-input" data-idx="${i}" placeholder="Outcome ${i+1}" value="${o}" style="flex:1">${f.outcomes.length>2?`<button class="remove-outcome" data-idx="${i}" style="background:none;border:none;cursor:pointer;color:var(--tx3);font-size:15px;padding:0 3px">×</button>`:''}</div>`).join('')}
-        </div>
-        <button id="add-outcome" style="background:none;border:1px dashed #D1D9E6;border-radius:5px;padding:6px;cursor:pointer;font-size:12px;color:var(--tx2);font-family:'Source Sans 3',sans-serif;width:100%;margin-top:5px">+ Add outcome</button>
-      </div>
+      <div><label style="font-size:11px;color:var(--tx2);margin-bottom:6px;display:block;font-weight:600">Outcomes *</label>
+        <div style="display:flex;flex-direction:column;gap:5px">${f.outcomes.map((o,i)=>`<div style="display:flex;gap:6px;align-items:center"><span class="m" style="font-size:10.5px;color:var(--tx3);min-width:18px">${i+1}.</span><input class="outcome-input" data-idx="${i}" placeholder="Outcome ${i+1}" value="${o}" style="flex:1">${f.outcomes.length>2?`<button class="remove-outcome" data-idx="${i}" style="background:none;border:none;cursor:pointer;color:var(--tx3);font-size:15px;padding:0 3px">×</button>`:''}</div>`).join('')}</div>
+        <button id="add-outcome" style="background:none;border:1px dashed #D1D9E6;border-radius:5px;padding:6px;cursor:pointer;font-size:12px;color:var(--tx2);font-family:'Source Sans 3',sans-serif;width:100%;margin-top:5px">+ Add outcome</button></div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
         <div><label style="font-size:11px;color:var(--tx2);margin-bottom:4px;display:block;font-weight:600">Category</label><select id="f-cat">${CATS.filter(c=>c!=='All').map(c=>`<option value="${c}" ${f.cat===c?'selected':''}>${CI[c]} ${c}</option>`).join('')}</select></div>
-        <div><label style="font-size:11px;color:var(--tx2);margin-bottom:4px;display:block;font-weight:600">End Date *</label><input type="date" id="f-end" value="${f.end}"></div>
-      </div>
+        <div><label style="font-size:11px;color:var(--tx2);margin-bottom:4px;display:block;font-weight:600">End Date *</label><input type="date" id="f-end" value="${f.end}"></div></div>
       <button class="btn btn-t" id="create-btn" style="width:100%;padding:11px;font-size:13.5px;margin-top:2px">Create Market</button>
     </div></div></div>`;
   document.getElementById('app').insertAdjacentHTML('beforeend',html);
@@ -504,21 +628,16 @@ function renderCreate(){
   document.getElementById('create-btn').onclick=createMarket;
 }
 
-// ── EDIT MODAL ──
-function renderEdit(){
+function mountEdit(){
   const ef=S.editForm;
   let html=`<div class="overlay" id="edit-overlay"><div class="modal">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px"><h2 style="font-size:16.5px;font-weight:700">Edit Market</h2><button class="xbtn" id="close-edit">×</button></div>
-    <p style="font-size:12.5px;color:var(--tx2);margin-bottom:16px;line-height:1.5">Add new outcomes or rename existing ones. New outcomes will be priced equally and renormalised.</p>
     <div style="display:flex;flex-direction:column;gap:12px">
       <div><label style="font-size:11px;color:var(--tx2);margin-bottom:4px;display:block;font-weight:600">Question</label><input id="ef-title" value="${ef.title}"></div>
       <div><label style="font-size:11px;color:var(--tx2);margin-bottom:4px;display:block;font-weight:600">Description</label><textarea id="ef-desc" rows="2" style="resize:vertical">${ef.desc}</textarea></div>
       <div><label style="font-size:11px;color:var(--tx2);margin-bottom:6px;display:block;font-weight:600">Outcomes</label>
-        <div style="display:flex;flex-direction:column;gap:5px">
-          ${ef.outcomes.map((o,i)=>`<div style="display:flex;gap:6px;align-items:center"><span class="m" style="font-size:10.5px;color:var(--tx3);min-width:18px">${i+1}.</span><input class="edit-outcome" data-idx="${i}" value="${o}" style="flex:1">${ef.outcomes.length>2?`<button class="rm-edit-oc" data-idx="${i}" style="background:none;border:none;cursor:pointer;color:var(--tx3);font-size:15px;padding:0 3px">×</button>`:''}</div>`).join('')}
-        </div>
-        <button id="add-edit-oc" style="background:none;border:1px dashed #D1D9E6;border-radius:5px;padding:6px;cursor:pointer;font-size:12px;color:var(--tx2);font-family:'Source Sans 3',sans-serif;width:100%;margin-top:5px">+ Add outcome</button>
-      </div>
+        <div style="display:flex;flex-direction:column;gap:5px">${ef.outcomes.map((o,i)=>`<div style="display:flex;gap:6px;align-items:center"><span class="m" style="font-size:10.5px;color:var(--tx3);min-width:18px">${i+1}.</span><input class="edit-outcome" data-idx="${i}" value="${o}" style="flex:1">${ef.outcomes.length>2?`<button class="rm-edit-oc" data-idx="${i}" style="background:none;border:none;cursor:pointer;color:var(--tx3);font-size:15px;padding:0 3px">×</button>`:''}</div>`).join('')}</div>
+        <button id="add-edit-oc" style="background:none;border:1px dashed #D1D9E6;border-radius:5px;padding:6px;cursor:pointer;font-size:12px;color:var(--tx2);font-family:'Source Sans 3',sans-serif;width:100%;margin-top:5px">+ Add outcome</button></div>
       <div><label style="font-size:11px;color:var(--tx2);margin-bottom:4px;display:block;font-weight:600">End Date</label><input type="date" id="ef-end" value="${ef.end}"></div>
       <button class="btn btn-t" id="save-edit-btn" style="width:100%;padding:11px;font-size:13.5px">Save Changes</button>
     </div></div></div>`;
@@ -534,33 +653,28 @@ function renderEdit(){
   document.getElementById('save-edit-btn').onclick=saveEdit;
 }
 
-// ── RESOLVE MODAL (admin only) ──
-function renderResolve(){
+function mountResolve(){
   const m=S.resolving;
   let html=`<div class="overlay" id="resolve-overlay"><div class="modal">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px"><h2 style="font-size:16.5px;font-weight:700">🏁 Resolve Market</h2><button class="xbtn" id="close-resolve">×</button></div>
-    <p style="font-size:13px;color:var(--tx);margin-bottom:4px;font-weight:600">${m.title}</p>
-    <p style="font-size:12.5px;color:var(--tx3);margin-bottom:18px;line-height:1.5">Select the winning outcome. This is <strong>permanent</strong> — the winner pays out at $1 per share, losers at $0.</p>
+    <p style="font-size:13px;font-weight:600;margin-bottom:4px">${m.title}</p>
+    <p style="font-size:12.5px;color:var(--tx3);margin-bottom:18px;line-height:1.5">Select the winner. <strong>Permanent.</strong> Winners get $1/share, losers $0.</p>
     <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:18px">
-      ${m.outcomes.map((o,j)=>`<button class="resolve-btn" data-idx="${j}" style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-radius:8px;border:2px solid var(--bdr);background:#F8FAFC;cursor:pointer;font-family:'Source Sans 3',sans-serif;transition:all .12s;font-size:14px;font-weight:600;color:var(--tx)">
-        <span>${o.label}</span><span class="m" style="font-size:14px;color:${T}">${Math.round(o.price*100)}¢</span>
-      </button>`).join('')}
+      ${m.outcomes.map((o,j)=>`<button class="resolve-btn" data-idx="${j}" style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-radius:8px;border:2px solid var(--bdr);background:#F8FAFC;cursor:pointer;font-family:'Source Sans 3',sans-serif;font-size:14px;font-weight:600;color:var(--tx);transition:all .12s"><span>${o.label}</span><span class="m" style="font-size:14px;color:${T}">${Math.round(o.price*100)}¢</span></button>`).join('')}
     </div>
     <div style="border-top:1px solid var(--bdr);padding-top:14px;display:flex;gap:8px">
-      <button class="btn" id="cancel-market-btn" style="background:#FEF3C7;color:#92400E;flex:1;font-size:12px">Cancel Market (void)</button>
+      <button class="btn" id="cancel-market-btn" style="background:#FEF3C7;color:#92400E;flex:1;font-size:12px">Cancel (refund all)</button>
       <button class="btn" id="delete-market-btn" style="background:rgba(239,68,68,.08);color:${RD};flex:1;font-size:12px">Delete Market</button>
-    </div>
-  </div></div>`;
+    </div></div></div>`;
   document.getElementById('app').insertAdjacentHTML('beforeend',html);
   document.getElementById('close-resolve').onclick=()=>{S.resolving=null;render()};
   document.getElementById('resolve-overlay').onclick=e=>{if(e.target===e.currentTarget){S.resolving=null;render()}};
   document.querySelectorAll('.resolve-btn').forEach(el=>{
     el.onmouseenter=()=>{el.style.borderColor=GN;el.style.background='#F0FDF4'};
     el.onmouseleave=()=>{el.style.borderColor='var(--bdr)';el.style.background='#F8FAFC'};
-    el.onclick=()=>{if(confirm('Resolve with "'+m.outcomes[parseInt(el.dataset.idx)].label+'" as winner?'))resolveMarket(parseInt(el.dataset.idx))}
-  });
-  document.getElementById('cancel-market-btn').onclick=()=>{if(confirm('Cancel this market?'))cancelMarket()};
-  document.getElementById('delete-market-btn').onclick=()=>{if(confirm('Permanently delete this market?'))deleteMarket(m.id)};
+    el.onclick=()=>{if(confirm('Resolve: "'+m.outcomes[parseInt(el.dataset.idx)].label+'" wins?'))resolveMarket(parseInt(el.dataset.idx))}});
+  document.getElementById('cancel-market-btn').onclick=()=>{if(confirm('Cancel and refund all?'))cancelMarket()};
+  document.getElementById('delete-market-btn').onclick=()=>{if(confirm('Permanently delete?'))deleteMarket(m.id)};
 }
 
 function bindEvents(){
@@ -573,9 +687,21 @@ function bindEvents(){
   document.querySelectorAll('.cat-btn').forEach(el=>{el.onclick=()=>{S.cat=el.dataset.cat;render()}});
   document.querySelectorAll('[data-market-id]').forEach(el=>{
     el.onclick=()=>{const m=S.markets.find(x=>x.id===parseInt(el.dataset.marketId));if(m){S.sel=m;S.selOc=0;S.side='yes';S.amt='';render()}}});
+  // Admin panel events
+  document.querySelectorAll('.add-funds-btn').forEach(el=>{
+    el.onclick=()=>{S.addFundsUser=el.dataset.user;S.addFundsAmt='';render()}});
+  if(document.getElementById('add-funds-amount'))
+    document.getElementById('add-funds-amount').addEventListener('input',e=>{S.addFundsAmt=e.target.value});
+  if(document.getElementById('add-funds-btn'))
+    document.getElementById('add-funds-btn').onclick=adminAddFunds;
+  if(document.getElementById('cancel-funds-btn'))
+    document.getElementById('cancel-funds-btn').onclick=()=>{S.addFundsUser=null;render()};
 }
 
+// Start
 init();
+// Check payouts after short delay
+setTimeout(()=>{if(S.name)checkPayouts()},2000);
 </script>
 </body>
 </html>
