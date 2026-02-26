@@ -24,11 +24,14 @@ body{background:var(--bg);font-family:'Source Sans 3','Segoe UI',sans-serif;colo
 .btn-t{background:var(--t);color:#fff}.btn-t:hover{background:var(--td)}
 .btn-ghost{background:transparent;border:1px solid var(--bdr);color:var(--tx2);font-size:12px;padding:6px 12px}
 .btn-ghost:hover{border-color:var(--tx3);color:var(--tx)}
+.btn-danger{background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);color:var(--rd);font-size:12px;padding:6px 12px}
+.btn-danger:hover{background:rgba(239,68,68,.15)}
 input,textarea,select{background:#fff;border:1px solid #D1D9E6;border-radius:6px;padding:9px 12px;color:var(--tx);font-family:'Source Sans 3',sans-serif;font-size:13.5px;outline:none;transition:border .15s;width:100%}
 input:focus,textarea:focus,select:focus{border-color:var(--t);box-shadow:0 0 0 3px rgba(27,138,158,.08)}
 .pill{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;letter-spacing:.4px;text-transform:uppercase}
 .overlay{position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:100;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)}
 .modal{background:#fff;border:1px solid var(--bdr);border-radius:14px;max-width:600px;width:95%;max-height:92vh;overflow-y:auto;padding:26px;animation:sr .2s ease;box-shadow:0 16px 48px rgba(0,0,0,.1)}
+.modal-lg{max-width:700px}
 .notif{position:fixed;top:14px;right:14px;z-index:200;padding:10px 16px;border-radius:7px;font-weight:500;font-size:13px;animation:ns .2s ease;box-shadow:0 4px 16px rgba(0,0,0,.12);border-left:3px solid;background:#fff}
 .tab{padding:5px 12px;border-radius:5px;cursor:pointer;font-size:13px;font-weight:500;color:var(--tx3);transition:all .1s;background:transparent;border:none;font-family:'Source Sans 3',sans-serif}
 .tab:hover{color:var(--tx2)}.tab.active{background:var(--tl);color:var(--t);font-weight:600}
@@ -47,7 +50,15 @@ footer{border-top:1px solid var(--bdr);padding:12px 22px;margin-top:30px;display
 .market-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}
 .port-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:22px}
 ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#D1D9E6;border-radius:2px}
-@media(max-width:700px){.stats-grid{grid-template-columns:repeat(2,1fr)}.port-grid{grid-template-columns:1fr}.market-grid{grid-template-columns:1fr}.hdr-inner{padding:0 12px;height:48px;flex-wrap:wrap;height:auto;padding-top:6px;padding-bottom:6px}main{padding:14px 12px}}
+.user-row{display:grid;grid-template-columns:1fr 100px 110px 140px;padding:12px 14px;border-bottom:1px solid #F1F5F9;align-items:center;cursor:pointer;transition:background .1s}
+.user-row:hover{background:var(--tll)}
+.user-row-admin{grid-template-columns:1fr 100px 110px 200px}
+.activity-row{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid #F1F5F9;font-size:12.5px}
+.activity-row:last-child{border-bottom:none}
+.editable-balance{background:transparent;border:1px solid transparent;border-radius:4px;padding:2px 6px;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;text-align:right;width:90px;cursor:pointer;transition:all .15s}
+.editable-balance:hover{border-color:#D1D9E6;background:#F8FAFC}
+.editable-balance:focus{border-color:var(--t);background:#fff;box-shadow:0 0 0 3px rgba(27,138,158,.08);cursor:text}
+@media(max-width:700px){.stats-grid{grid-template-columns:repeat(2,1fr)}.port-grid{grid-template-columns:1fr}.market-grid{grid-template-columns:1fr}.hdr-inner{padding:0 12px;height:auto;flex-wrap:wrap;padding-top:6px;padding-bottom:6px}main{padding:14px 12px}.user-row,.user-row-admin{grid-template-columns:1fr 70px 70px auto;font-size:12px}}
 .setup-screen{min-height:100vh;background:var(--bg);display:flex;align-items:center;justify-content:center}
 .setup-box{background:#fff;border-radius:16px;padding:36px;max-width:440px;width:92%;text-align:center;box-shadow:0 8px 40px rgba(0,0,0,.06);animation:fu .4s ease}
 </style>
@@ -56,7 +67,7 @@ footer{border-top:1px solid var(--bdr);padding:12px 22px;margin-top:30px;display
 <div id="app"></div>
 <script>
 // ═══════════════════════════════════════════════════
-// CMDpredict v3 — payout, no jitter, admin users
+// CMDpredict v4 — Activity ledger, user profiles, admin CRUD
 // ═══════════════════════════════════════════════════
 
 const ADMINS=["quincy m.","quincy mcdougal","admin"];
@@ -87,6 +98,12 @@ let S={
   sel:null,selOc:0,side:'yes',amt:'',
   creating:false,editing:null,resolving:null,adminPanel:false,
   addFundsUser:null,addFundsAmt:'',
+  // User profile modal (visible to everyone)
+  viewingUser:null,
+  // Admin: add new user modal
+  addingUser:false,newUserName:'',newUserBalance:'10000',
+  // Admin: editing balance inline
+  editingBalance:null,editBalanceVal:'',
   notif:null,
   form:{title:'',desc:'',cat:'Other',end:'',outcomes:['Yes','No']},
   editForm:{outcomes:[]},
@@ -122,14 +139,74 @@ function saveMarkets(m){if(useFirebase){const o={};m.forEach(x=>{o[x.id]=x});db.
 function saveTrade(t){if(useFirebase)db.ref('trades/'+t.id).set(t);else{const a=JSON.parse(localStorage.getItem('cmdp_trades')||'[]');a.push(t);localStorage.setItem('cmdp_trades',JSON.stringify(a))}}
 function savePortfolio(){
   localStorage.setItem('cmdp_portfolio',JSON.stringify(S.portfolio));
-  // Also save to shared users store so admin can see balances
-  const u=S.users[S.name]||{};
+  const u=S.users[encodeKey(S.name)]||S.users[S.name]||{};
   u.name=S.name;u.balance=S.portfolio.balance;u.lastSeen=Date.now();
   if(useFirebase)db.ref('users/'+encodeKey(S.name)).set(u);
-  else{S.users[S.name]=u;localStorage.setItem('cmdp_users',JSON.stringify(S.users))}
+  else{S.users[encodeKey(S.name)]=u;localStorage.setItem('cmdp_users',JSON.stringify(S.users))}
 }
 function encodeKey(k){return k.replace(/[.#$\/\[\]]/g,'_')}
 function flash(msg,type='ok'){S.notif={msg,type};render();setTimeout(()=>{S.notif=null;render()},3200)}
+
+// ── ACTIVITY LEDGER ──
+// Every significant action is logged to the activity ledger in Firebase/localStorage
+function logActivity(entry){
+  const a={id:Date.now()+'_'+Math.random().toString(36).slice(2,6),ts:Date.now(),...entry};
+  if(useFirebase){
+    db.ref('activity/'+a.id).set(a);
+  }else{
+    const acts=JSON.parse(localStorage.getItem('cmdp_activity')||'[]');
+    acts.push(a);
+    localStorage.setItem('cmdp_activity',JSON.stringify(acts));
+  }
+}
+
+// Load activity log
+let activityLog=[];
+function initActivityLog(){
+  if(useFirebase){
+    db.ref('activity').on('value',snap=>{
+      const v=snap.val();activityLog=v?Object.values(v):[];
+      activityLog.sort((a,b)=>b.ts-a.ts);
+    });
+  }else{
+    activityLog=JSON.parse(localStorage.getItem('cmdp_activity')||'[]');
+    activityLog.sort((a,b)=>b.ts-a.ts);
+  }
+}
+
+// ── Get user stats from trades ──
+function getUserStats(userName){
+  const userTrades=S.trades.filter(t=>t.who===userName);
+  let totalVolume=0,totalPnl=0,wins=0,losses=0;
+  const tradeDetails=[];
+
+  userTrades.forEach(t=>{
+    totalVolume+=(t.amount||0);
+    const mk=S.markets.find(m=>m.id===t.mid);
+    let cur=t.avg,pnl=0,status='open';
+    if(mk&&mk.outcomes[t.outcomeIdx]){
+      if(mk.resolved){
+        const won=(t.side==='yes'&&t.outcomeIdx===mk.winnerIdx)||(t.side==='no'&&t.outcomeIdx!==mk.winnerIdx);
+        if(mk.cancelled){
+          pnl=0;status='cancelled';
+        }else if(won){
+          pnl=t.shares-t.amount;wins++;status='won';
+        }else{
+          pnl=-t.amount;losses++;status='lost';
+        }
+      }else{
+        cur=t.side==='yes'?mk.outcomes[t.outcomeIdx].price:(1-mk.outcomes[t.outcomeIdx].price);
+        pnl=(cur-t.avg)*t.shares;
+        status='open';
+      }
+    }
+    totalPnl+=pnl;
+    tradeDetails.push({...t,currentPrice:cur,pnl,status,marketTitle:t.title||mk?.title||'Unknown'});
+  });
+
+  tradeDetails.sort((a,b)=>b.ts-a.ts);
+  return{trades:tradeDetails,totalVolume,totalPnl,wins,losses,totalTrades:userTrades.length};
+}
 
 // ── CPMM ──
 function cpmmBuy(market,oi,side,amount){
@@ -147,7 +224,8 @@ function cpmmBuy(market,oi,side,amount){
 // ── ACTIONS ──
 function confirmName(){
   if(!S.nameIn.trim())return;S.name=S.nameIn.trim();localStorage.setItem('cmdp_name',S.name);
-  savePortfolio(); // register in shared users
+  savePortfolio();
+  logActivity({type:'join',user:S.name,desc:`${S.name} joined CMDpredict`});
   render();
 }
 
@@ -161,6 +239,7 @@ function createMarket(){
     outcomes:labels.map(l=>({label:l,price:ip,pool:100,history:[ip]})),
     volume:0,liquidity:1000,traders:0,resolved:false,winnerIdx:null,createdAt:new Date().toISOString()};
   S.markets=[m,...S.markets];saveMarkets(S.markets);
+  logActivity({type:'market_created',user:S.name,marketId:m.id,desc:`${S.name} created market: "${f.title}"`});
   S.creating=false;S.form={title:'',desc:'',cat:'Other',end:'',outcomes:['Yes','No']};
   flash("Market created!");
 }
@@ -180,6 +259,8 @@ function trade(){
   S.portfolio.positions.push(rec);savePortfolio();
   S.markets=S.markets.map(m=>m.id!==S.sel.id?m:updated);saveMarkets(S.markets);
   S.sel=updated;S.amt='';
+  logActivity({type:'trade',user:S.name,marketId:S.sel.id,amount:a,side:S.side,outcome:oc.label,
+    desc:`${S.name} bought ${shares} ${S.side.toUpperCase()} "${oc.label}" at ${Math.round(price*100)}¢ for $${a}`});
   flash(`Bought ${shares} ${S.side.toUpperCase()} "${oc.label}" at ${Math.round(price*100)}¢`);
 }
 
@@ -210,21 +291,17 @@ function resolveMarket(winnerIdx){
   u.outcomes.forEach((o,i)=>{o.price=i===winnerIdx?1:0;o.history=[...(o.history||[]),o.price]});
   S.markets=S.markets.map(x=>x.id===u.id?u:x);saveMarkets(S.markets);
 
-  // ── PAYOUT: credit local user ──
   let payout=0;
   S.portfolio.positions.forEach(p=>{
     if(p.mid!==u.id)return;
     const won=(p.side==='yes'&&p.outcomeIdx===winnerIdx)||(p.side==='no'&&p.outcomeIdx!==winnerIdx);
-    if(won)payout+=p.shares; // $1 per share
-    // losers get $0 (they already paid)
+    if(won)payout+=p.shares;
   });
   if(payout>0){
     S.portfolio.balance=Math.round((S.portfolio.balance+payout)*100)/100;
     savePortfolio();
   }
 
-  // ── PAYOUT: save payout record for other users to pick up ──
-  // Each user checks on load if there are unprocessed payouts for them
   const payoutsByUser={};
   S.trades.forEach(t=>{
     if(t.mid!==u.id)return;
@@ -232,7 +309,6 @@ function resolveMarket(winnerIdx){
     if(!payoutsByUser[t.who])payoutsByUser[t.who]=0;
     if(won)payoutsByUser[t.who]+=t.shares;
   });
-  // Store payouts in Firebase so other users can claim them
   if(useFirebase){
     Object.entries(payoutsByUser).forEach(([who,amt])=>{
       if(amt>0){
@@ -244,6 +320,9 @@ function resolveMarket(winnerIdx){
     });
   }
 
+  logActivity({type:'resolve',user:S.name,marketId:u.id,winner:u.outcomes[winnerIdx].label,
+    desc:`${S.name} resolved "${u.title}" → ${u.outcomes[winnerIdx].label} wins`});
+
   S.resolving=null;S.sel=u;
   flash(`Resolved: "${u.outcomes[winnerIdx].label}" wins! Payouts distributed.`);
 }
@@ -254,12 +333,10 @@ function cancelMarket(){
   u.resolved=true;u.cancelled=true;u.resolvedAt=new Date().toISOString();u.resolvedBy=S.name;
   S.markets=S.markets.map(x=>x.id===u.id?u:x);saveMarkets(S.markets);
 
-  // Refund all trades on this market for local user
   let refund=0;
   S.portfolio.positions.forEach(p=>{if(p.mid===u.id)refund+=p.amount||0});
   if(refund>0){S.portfolio.balance=Math.round((S.portfolio.balance+refund)*100)/100;savePortfolio()}
 
-  // Store refunds for other users
   if(useFirebase){
     const refundsByUser={};
     S.trades.forEach(t=>{if(t.mid!==u.id)return;if(!refundsByUser[t.who])refundsByUser[t.who]=0;refundsByUser[t.who]+=(t.amount||0)});
@@ -267,12 +344,15 @@ function cancelMarket(){
       if(amt>0)db.ref('payouts/'+u.id+'_'+encodeKey(who)).set({mid:u.id,who,amount:Math.round(amt*100)/100,marketTitle:u.title,winner:'CANCELLED',ts:Date.now(),claimed:false});
     });
   }
+  logActivity({type:'cancel',user:S.name,marketId:u.id,desc:`${S.name} cancelled "${u.title}" — all refunded`});
   S.resolving=null;S.sel=u;flash("Market cancelled. Refunds distributed.");
 }
 
 function deleteMarket(id){
-  S.markets=S.markets.filter(m=>m.id!==id);saveMarkets(S.markets);
+  const m=S.markets.find(x=>x.id===id);
+  S.markets=S.markets.filter(x=>x.id!==id);saveMarkets(S.markets);
   if(useFirebase)db.ref('markets/'+id).remove();
+  logActivity({type:'delete_market',user:S.name,marketId:id,desc:`${S.name} deleted market "${m?.title||id}"`});
   S.sel=null;S.resolving=null;S.editing=null;flash("Market deleted.");
 }
 
@@ -307,21 +387,87 @@ function adminAddFunds(){
       const u=snap.val()||{name:who,balance:10000};
       u.balance=Math.round((u.balance+amt)*100)/100;
       db.ref('users/'+key).set(u);
-      // Also create a payout record so the user picks it up
       db.ref('payouts/admin_'+Date.now()+'_'+key).set({
         mid:0,who,amount:amt,marketTitle:'Admin top-up by '+S.name,winner:'TOP-UP',ts:Date.now(),claimed:false
       });
+      logActivity({type:'admin_funds',user:S.name,target:who,amount:amt,desc:`${S.name} added $${amt} to ${who}'s balance`});
       flash(`Added $${amt} to ${who}'s balance`);
       S.addFundsUser=null;S.addFundsAmt='';render();
     });
   }else{
-    const u=S.users[who]||{name:who,balance:10000};
+    const u=S.users[key]||S.users[who]||{name:who,balance:10000};
     u.balance=Math.round((u.balance+amt)*100)/100;
-    S.users[who]=u;localStorage.setItem('cmdp_users',JSON.stringify(S.users));
+    S.users[key]=u;localStorage.setItem('cmdp_users',JSON.stringify(S.users));
     if(who===S.name){S.portfolio.balance=u.balance;savePortfolio()}
+    logActivity({type:'admin_funds',user:S.name,target:who,amount:amt,desc:`${S.name} added $${amt} to ${who}'s balance`});
     flash(`Added $${amt} to ${who}'s balance`);
     S.addFundsUser=null;S.addFundsAmt='';render();
   }
+}
+
+// ── Admin: set balance directly ──
+function adminSetBalance(who,newBalance){
+  const key=encodeKey(who);
+  const bal=Math.round(parseFloat(newBalance)*100)/100;
+  if(isNaN(bal)){flash("Invalid balance","err");return}
+  if(useFirebase){
+    db.ref('users/'+key).once('value',snap=>{
+      const u=snap.val()||{name:who,balance:10000};
+      const oldBal=u.balance;
+      u.balance=bal;
+      db.ref('users/'+key).set(u);
+      if(who===S.name){S.portfolio.balance=bal;savePortfolio()}
+      logActivity({type:'admin_set_balance',user:S.name,target:who,oldBalance:oldBal,newBalance:bal,
+        desc:`${S.name} set ${who}'s balance from $${oldBal} to $${bal}`});
+      flash(`Set ${who}'s balance to $${bal}`);
+      S.editingBalance=null;render();
+    });
+  }else{
+    const u=S.users[key]||S.users[who]||{name:who,balance:10000};
+    const oldBal=u.balance;
+    u.balance=bal;
+    S.users[key]=u;localStorage.setItem('cmdp_users',JSON.stringify(S.users));
+    if(who===S.name){S.portfolio.balance=bal;savePortfolio()}
+    logActivity({type:'admin_set_balance',user:S.name,target:who,oldBalance:oldBal,newBalance:bal,
+      desc:`${S.name} set ${who}'s balance from $${oldBal} to $${bal}`});
+    flash(`Set ${who}'s balance to $${bal}`);
+    S.editingBalance=null;render();
+  }
+}
+
+// ── Admin: delete a user ──
+function adminDeleteUser(who){
+  if(!confirm(`Delete user "${who}"? This removes their profile but not their trade history.`))return;
+  const key=encodeKey(who);
+  if(useFirebase){
+    db.ref('users/'+key).remove();
+  }else{
+    delete S.users[key];
+    delete S.users[who];
+    localStorage.setItem('cmdp_users',JSON.stringify(S.users));
+  }
+  logActivity({type:'admin_delete_user',user:S.name,target:who,desc:`${S.name} deleted user "${who}"`});
+  flash(`Deleted user "${who}"`);
+  render();
+}
+
+// ── Admin: add a new user ──
+function adminAddUser(){
+  const name=S.newUserName.trim();
+  const bal=parseFloat(S.newUserBalance)||10000;
+  if(!name){flash("Enter a name","err");return}
+  const key=encodeKey(name);
+  const existing=S.users[key];
+  if(existing){flash("User already exists","err");return}
+  const u={name,balance:bal,lastSeen:Date.now()};
+  if(useFirebase){
+    db.ref('users/'+key).set(u);
+  }else{
+    S.users[key]=u;localStorage.setItem('cmdp_users',JSON.stringify(S.users));
+  }
+  logActivity({type:'admin_add_user',user:S.name,target:name,balance:bal,desc:`${S.name} added user "${name}" with $${bal}`});
+  flash(`Added user "${name}" with $${bal}`);
+  S.addingUser=false;S.newUserName='';S.newUserBalance='10000';render();
 }
 
 // ── SPARKLINE ──
@@ -340,17 +486,30 @@ function getLeaderboard(){
     map[t.who].trades++;map[t.who].volume+=(t.amount||0);
     const mk=S.markets.find(m=>m.id===t.mid);
     if(mk&&mk.outcomes[t.outcomeIdx]){
-      const cur=t.side==='yes'?mk.outcomes[t.outcomeIdx].price:(1-mk.outcomes[t.outcomeIdx].price);
-      map[t.who].pnl+=(cur-t.avg)*t.shares;
+      if(mk.resolved){
+        const won=(t.side==='yes'&&t.outcomeIdx===mk.winnerIdx)||(t.side==='no'&&t.outcomeIdx!==mk.winnerIdx);
+        if(mk.cancelled){/* no pnl */}
+        else if(won)map[t.who].pnl+=(t.shares-t.amount);
+        else map[t.who].pnl+=(-t.amount);
+      }else{
+        const cur=t.side==='yes'?mk.outcomes[t.outcomeIdx].price:(1-mk.outcomes[t.outcomeIdx].price);
+        map[t.who].pnl+=(cur-t.avg)*t.shares;
+      }
     }
   });
   return Object.values(map).sort((a,b)=>b.pnl-a.pnl);
 }
 
-// ═══ RENDER ═══
-// Track which modal is open to avoid re-rendering the trade input
-let _skipFullRender=false;
+// ── Helper: time ago ──
+function timeAgo(ts){
+  const s=Math.floor((Date.now()-ts)/1000);
+  if(s<60)return'just now';
+  if(s<3600)return Math.floor(s/60)+'m ago';
+  if(s<86400)return Math.floor(s/3600)+'h ago';
+  return Math.floor(s/86400)+'d ago';
+}
 
+// ═══ RENDER ═══
 function render(){
   const app=document.getElementById('app'),s=S;
   if(s.ready&&!s.name){
@@ -378,7 +537,7 @@ function render(){
   const list=s.markets.filter(m=>s.cat==='All'||m.category===s.cat).filter(m=>m.title.toLowerCase().includes(s.q.toLowerCase()))
     .sort((a,b)=>s.sort==='newest'?b.id-a.id:(b.volume||0)-(a.volume||0));
   const tv=s.markets.reduce((x,m)=>x+(m.volume||0),0),tt=s.trades.length,lb=getLeaderboard(),admin=isAdmin();
-  const tabs=['markets','portfolio','leaderboard'];
+  const tabs=['markets','portfolio','leaderboard','activity'];
   if(admin)tabs.push('admin');
 
   app.innerHTML=`
@@ -391,7 +550,7 @@ function render(){
       </div>
       <div style="width:1px;height:20px;background:var(--bdr)"></div>
       <div style="display:flex;gap:1px">
-        ${tabs.map(v=>`<button class="tab ${s.view===v?'active':''}" data-view="${v}">${v==='admin'?'⚙️ Admin':v[0].toUpperCase()+v.slice(1)}</button>`).join('')}
+        ${tabs.map(v=>`<button class="tab ${s.view===v?'active':''}" data-view="${v}">${v==='admin'?'⚙️ Admin':v==='activity'?'📋 Activity':v[0].toUpperCase()+v.slice(1)}</button>`).join('')}
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:10px">
@@ -410,6 +569,7 @@ function render(){
   ${s.view==='markets'?renderMarkets(list,tv,tt,lb):''}
   ${s.view==='portfolio'?renderPortfolio():''}
   ${s.view==='leaderboard'?renderLeaderboard(lb):''}
+  ${s.view==='activity'?renderActivityFeed():''}
   ${s.view==='admin'&&admin?renderAdmin():''}
 
   </main>
@@ -423,10 +583,12 @@ function render(){
   if(s.creating)mountCreate();
   if(s.editing)mountEdit();
   if(s.resolving)mountResolve();
+  if(s.viewingUser)mountUserProfile();
+  if(s.addingUser&&admin)mountAddUser();
   bindEvents();
 }
 
-// ── VIEW RENDERERS (return HTML strings) ──
+// ── VIEW RENDERERS ──
 function renderMarkets(list,tv,tt,lb){
   const s=S;
   return`
@@ -476,11 +638,12 @@ function renderPortfolio(){
 }
 
 function renderLeaderboard(lb){
-  return`<h2 style="font-size:18px;font-weight:700;margin-bottom:18px">Analyst Leaderboard</h2>
+  return`<h2 style="font-size:18px;font-weight:700;margin-bottom:6px">Analyst Leaderboard</h2>
+    <p style="font-size:12.5px;color:var(--tx2);margin-bottom:18px">Click any analyst to view their full trade history and P&L breakdown.</p>
     ${lb.length===0?`<div style="text-align:center;padding:40px;color:var(--tx3);background:#fff;border:1px solid var(--bdr);border-radius:10px"><div style="font-size:32px;margin-bottom:8px">🏆</div><div style="font-size:14px">No trades yet</div></div>`:`
       <div style="background:#fff;border:1px solid var(--bdr);border-radius:10px;overflow:hidden">
         <div style="display:grid;grid-template-columns:40px 1fr 90px 80px 70px;padding:10px 14px;border-bottom:1px solid var(--bdr);font-size:9.5px;color:var(--tx3);text-transform:uppercase;letter-spacing:.5px;font-weight:600"><span>#</span><span>Analyst</span><span style="text-align:right">P&amp;L</span><span style="text-align:right">Volume</span><span style="text-align:right">Trades</span></div>
-        ${lb.map((u,i)=>`<div style="display:grid;grid-template-columns:40px 1fr 90px 80px 70px;padding:12px 14px;border-bottom:1px solid #F1F5F9;align-items:center;${u.name===S.name?'background:'+TL:''}">
+        ${lb.map((u,i)=>`<div class="view-user-btn" data-user="${u.name}" style="display:grid;grid-template-columns:40px 1fr 90px 80px 70px;padding:12px 14px;border-bottom:1px solid #F1F5F9;align-items:center;cursor:pointer;transition:background .1s;${u.name===S.name?'background:'+TL:''}" onmouseover="this.style.background='${TL}'" onmouseout="this.style.background='${u.name===S.name?TL:''}'">
           <span class="m" style="font-weight:700;font-size:13px;color:${i===0?'#F59E0B':i===1?'#94A3B8':i===2?'#CD7F32':'#CBD5E1'}">${i+1}</span>
           <div style="display:flex;align-items:center;gap:8px"><div style="width:26px;height:26px;border-radius:50%;background:${T};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff">${u.name.slice(0,2).toUpperCase()}</div><span style="font-weight:600;font-size:13px">${u.name}${u.name===S.name?' (you)':''}</span></div>
           <span class="m" style="text-align:right;font-weight:700;font-size:13px;color:${u.pnl>=0?GN:RD}">${u.pnl>=0?'+':''}$${Math.abs(u.pnl).toFixed(0)}</span>
@@ -490,31 +653,106 @@ function renderLeaderboard(lb){
       </div>`}`;
 }
 
+// ── ACTIVITY FEED (visible to all) ──
+function renderActivityFeed(){
+  const recentTrades=[...S.trades].sort((a,b)=>b.ts-a.ts).slice(0,50);
+  const recentActivity=activityLog.slice(0,30);
+
+  // Merge trades + activity into one timeline
+  const timeline=[];
+  recentTrades.forEach(t=>{
+    timeline.push({ts:t.ts,type:'trade',data:t});
+  });
+  recentActivity.forEach(a=>{
+    if(a.type!=='trade')timeline.push({ts:a.ts,type:a.type,data:a});
+  });
+  timeline.sort((a,b)=>b.ts-a.ts);
+  const items=timeline.slice(0,60);
+
+  const icons={trade:'💰',market_created:'🏛️',resolve:'🏁',cancel:'❌',join:'👋',admin_funds:'💸',admin_set_balance:'⚖️',admin_add_user:'➕',admin_delete_user:'🗑️',delete_market:'🗑️'};
+
+  return`<h2 style="font-size:18px;font-weight:700;margin-bottom:6px">Activity Feed</h2>
+    <p style="font-size:12.5px;color:var(--tx2);margin-bottom:18px">All trading activity and market events. Click any user to view their profile.</p>
+    ${items.length===0?`<div style="text-align:center;padding:40px;color:var(--tx3);background:#fff;border:1px solid var(--bdr);border-radius:10px"><div style="font-size:32px;margin-bottom:8px">📋</div><div style="font-size:14px">No activity yet — start trading!</div></div>`:`
+      <div style="background:#fff;border:1px solid var(--bdr);border-radius:10px;overflow:hidden">
+        ${items.map(item=>{
+          if(item.type==='trade'){
+            const t=item.data;
+            return`<div class="activity-row">
+              <div style="display:flex;align-items:center;gap:10px;min-width:0;flex:1">
+                <span style="font-size:16px;flex-shrink:0">💰</span>
+                <div style="min-width:0">
+                  <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                    <span class="view-user-btn" data-user="${t.who}" style="font-weight:600;color:${T};cursor:pointer">${t.who}</span>
+                    <span>bought</span>
+                    <span class="pill" style="background:${t.side==='yes'?'rgba(16,185,129,.07)':'rgba(239,68,68,.07)'};color:${t.side==='yes'?GN:RD}">${t.side.toUpperCase()}</span>
+                    <span style="font-weight:500">"${t.outcomeLabel}"</span>
+                  </div>
+                  <div style="font-size:11px;color:var(--tx3);margin-top:2px">${t.title} · ${t.shares} shares @ ${Math.round(t.avg*100)}¢ · $${(t.amount||0).toFixed(0)}</div>
+                </div>
+              </div>
+              <span style="font-size:11px;color:var(--tx3);flex-shrink:0;margin-left:8px">${timeAgo(item.ts)}</span>
+            </div>`;
+          }else{
+            const a=item.data;
+            return`<div class="activity-row">
+              <div style="display:flex;align-items:center;gap:10px;min-width:0;flex:1">
+                <span style="font-size:16px;flex-shrink:0">${icons[a.type]||'📌'}</span>
+                <div style="min-width:0">
+                  <div style="font-size:12.5px">${a.desc||a.type}</div>
+                </div>
+              </div>
+              <span style="font-size:11px;color:var(--tx3);flex-shrink:0;margin-left:8px">${timeAgo(item.ts)}</span>
+            </div>`;
+          }
+        }).join('')}
+      </div>`}`;
+}
+
+// ── ADMIN PANEL ──
 function renderAdmin(){
   const users=Object.values(S.users).sort((a,b)=>(b.balance||0)-(a.balance||0));
   return`<h2 style="font-size:18px;font-weight:700;margin-bottom:18px">⚙️ Admin Panel</h2>
-    <div class="stats-grid" style="grid-template-columns:repeat(3,1fr)">
+    <div class="stats-grid" style="grid-template-columns:repeat(4,1fr)">
       <div class="stat-card"><div class="stat-label">Registered Users</div><div class="m" style="font-size:20px;font-weight:700;color:${T}">${users.length}</div></div>
       <div class="stat-card"><div class="stat-label">Total Markets</div><div class="m" style="font-size:20px;font-weight:700;color:${GN}">${S.markets.length}</div></div>
       <div class="stat-card"><div class="stat-label">Total Trades</div><div class="m" style="font-size:20px;font-weight:700;color:#F59E0B">${S.trades.length}</div></div>
+      <div class="stat-card"><div class="stat-label">Activity Log</div><div class="m" style="font-size:20px;font-weight:700;color:#6366F1">${activityLog.length}</div></div>
     </div>
-    <h3 style="font-size:15px;font-weight:700;margin-bottom:12px">All Users</h3>
-    ${users.length===0?`<div style="padding:30px;text-align:center;color:var(--tx3);background:#fff;border:1px solid var(--bdr);border-radius:10px">No users registered yet</div>`:`
+
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <h3 style="font-size:15px;font-weight:700">All Users</h3>
+      <button class="btn btn-t" id="admin-add-user-btn" style="padding:5px 12px;font-size:12px">+ Add User</button>
+    </div>
+
+    ${users.length===0?`<div style="padding:30px;text-align:center;color:var(--tx3);background:#fff;border:1px solid var(--bdr);border-radius:10px">No users registered yet. Users appear here once they log in or you add them manually.</div>`:`
       <div style="background:#fff;border:1px solid var(--bdr);border-radius:10px;overflow:hidden">
-        <div style="display:grid;grid-template-columns:1fr 100px 110px 80px;padding:10px 14px;border-bottom:1px solid var(--bdr);font-size:9.5px;color:var(--tx3);text-transform:uppercase;letter-spacing:.5px;font-weight:600">
-          <span>User</span><span style="text-align:right">Balance</span><span style="text-align:right">Last Active</span><span style="text-align:right">Action</span>
+        <div class="user-row-admin" style="padding:10px 14px;border-bottom:1px solid var(--bdr);font-size:9.5px;color:var(--tx3);text-transform:uppercase;letter-spacing:.5px;font-weight:600;display:grid;cursor:default">
+          <span>User</span><span style="text-align:right">Balance</span><span style="text-align:right">Last Active</span><span style="text-align:right">Actions</span>
         </div>
-        ${users.map(u=>`
-          <div style="display:grid;grid-template-columns:1fr 100px 110px 80px;padding:12px 14px;border-bottom:1px solid #F1F5F9;align-items:center">
-            <div style="display:flex;align-items:center;gap:8px">
+        ${users.map(u=>{
+          const stats=getUserStats(u.name);
+          return`
+          <div class="user-row-admin" style="display:grid;cursor:default">
+            <div style="display:flex;align-items:center;gap:8px;cursor:pointer" class="view-user-btn" data-user="${u.name}">
               <div style="width:26px;height:26px;border-radius:50%;background:${T};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff">${(u.name||'?').slice(0,2).toUpperCase()}</div>
-              <span style="font-weight:600;font-size:13px">${u.name||'Unknown'}</span>
+              <div>
+                <span style="font-weight:600;font-size:13px;color:${T}">${u.name||'Unknown'}</span>
+                <div style="font-size:10px;color:var(--tx3)">${stats.totalTrades} trades · P&L: <span style="color:${stats.totalPnl>=0?GN:RD}">${stats.totalPnl>=0?'+':''}$${Math.abs(stats.totalPnl).toFixed(0)}</span></div>
+              </div>
             </div>
-            <span class="m" style="text-align:right;font-weight:600;color:${(u.balance||0)>0?GN:RD};font-size:13px">$${(u.balance||0).toLocaleString()}</span>
-            <span style="text-align:right;font-size:11px;color:var(--tx3)">${u.lastSeen?new Date(u.lastSeen).toLocaleDateString('en-GB',{day:'numeric',month:'short'}):'-'}</span>
-            <div style="text-align:right"><button class="btn btn-ghost add-funds-btn" data-user="${u.name}" style="padding:4px 8px;font-size:11px">+ Funds</button></div>
-          </div>
-        `).join('')}
+            <div style="text-align:right;display:flex;align-items:center;justify-content:flex-end">
+              ${S.editingBalance===u.name
+                ?`<input type="number" class="editable-balance admin-balance-input" data-user="${u.name}" value="${u.balance||0}" style="border-color:${T};background:#fff;box-shadow:0 0 0 3px rgba(27,138,158,.08)">`
+                :`<span class="editable-balance admin-balance-edit" data-user="${u.name}" title="Click to edit" style="color:${(u.balance||0)>=0?GN:RD}">$${(u.balance||0).toLocaleString()}</span>`}
+            </div>
+            <span style="text-align:right;font-size:11px;color:var(--tx3)">${u.lastSeen?timeAgo(u.lastSeen):'-'}</span>
+            <div style="text-align:right;display:flex;gap:4px;justify-content:flex-end">
+              <button class="btn btn-ghost add-funds-btn" data-user="${u.name}" style="padding:4px 8px;font-size:11px">+ Funds</button>
+              <button class="btn btn-danger admin-delete-btn" data-user="${u.name}" style="padding:4px 8px;font-size:11px">Delete</button>
+            </div>
+          </div>`;
+        }).join('')}
       </div>
     `}
 
@@ -527,13 +765,103 @@ function renderAdmin(){
           <button class="btn btn-ghost" id="cancel-funds-btn">Cancel</button>
         </div>
       </div>
-    `:''}`;
+    `:''}
+
+    <h3 style="font-size:15px;font-weight:700;margin-top:24px;margin-bottom:12px">Recent Activity Log</h3>
+    <div style="background:#fff;border:1px solid var(--bdr);border-radius:10px;overflow:hidden;max-height:400px;overflow-y:auto">
+      ${activityLog.length===0?`<div style="padding:20px;text-align:center;color:var(--tx3);font-size:13px">No activity logged yet. Actions will appear here as users trade, create markets, etc.</div>`:`
+        ${activityLog.slice(0,40).map(a=>`<div class="activity-row">
+          <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1">
+            <span style="font-size:14px">${{trade:'💰',market_created:'🏛️',resolve:'🏁',cancel:'❌',join:'👋',admin_funds:'💸',admin_set_balance:'⚖️',admin_add_user:'➕',admin_delete_user:'🗑️',delete_market:'🗑️'}[a.type]||'📌'}</span>
+            <span style="font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${a.desc||a.type}</span>
+          </div>
+          <span style="font-size:10.5px;color:var(--tx3);flex-shrink:0">${timeAgo(a.ts)}</span>
+        </div>`).join('')}
+      `}
+    </div>`;
+}
+
+// ── USER PROFILE MODAL (visible to everyone) ──
+function mountUserProfile(){
+  const userName=S.viewingUser;
+  const stats=getUserStats(userName);
+  const userInfo=Object.values(S.users).find(u=>u.name===userName);
+  const balance=userInfo?userInfo.balance:null;
+
+  let html=`<div class="overlay" id="userprofile-overlay"><div class="modal modal-lg">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="width:42px;height:42px;border-radius:50%;background:${T};display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:#fff">${userName.slice(0,2).toUpperCase()}</div>
+        <div>
+          <h2 style="font-size:17px;font-weight:700">${userName}${userName===S.name?' (you)':''}</h2>
+          ${balance!==null?`<div class="m" style="font-size:13px;color:${GN};font-weight:600">Balance: $${balance.toLocaleString()}</div>`:''}
+        </div>
+      </div>
+      <button class="xbtn" id="close-userprofile">×</button>
+    </div>
+
+    <div class="stats-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:18px">
+      <div class="stat-card"><div class="stat-label">Total P&L</div><div class="m" style="font-size:18px;font-weight:700;color:${stats.totalPnl>=0?GN:RD}">${stats.totalPnl>=0?'+':''}$${Math.abs(stats.totalPnl).toFixed(0)}</div></div>
+      <div class="stat-card"><div class="stat-label">Total Volume</div><div class="m" style="font-size:18px;font-weight:700;color:${T}">$${stats.totalVolume.toFixed(0)}</div></div>
+      <div class="stat-card"><div class="stat-label">Win / Loss</div><div class="m" style="font-size:18px;font-weight:700"><span style="color:${GN}">${stats.wins}</span> <span style="color:var(--tx3)">/</span> <span style="color:${RD}">${stats.losses}</span></div></div>
+      <div class="stat-card"><div class="stat-label">Total Trades</div><div class="m" style="font-size:18px;font-weight:700;color:#6366F1">${stats.totalTrades}</div></div>
+    </div>
+
+    <h3 style="font-size:14px;font-weight:700;margin-bottom:10px">Trade History</h3>
+    ${stats.trades.length===0?`<div style="padding:24px;text-align:center;color:var(--tx3);background:#F8FAFC;border-radius:8px;font-size:13px">No trades yet</div>`:`
+      <div style="background:#fff;border:1px solid var(--bdr);border-radius:8px;overflow:hidden;max-height:400px;overflow-y:auto">
+        <div style="display:grid;grid-template-columns:1fr 70px 80px 70px 60px;padding:8px 12px;border-bottom:1px solid var(--bdr);font-size:9px;color:var(--tx3);text-transform:uppercase;letter-spacing:.5px;font-weight:600">
+          <span>Market</span><span style="text-align:center">Side</span><span style="text-align:right">Amount</span><span style="text-align:right">P&L</span><span style="text-align:right">Status</span>
+        </div>
+        ${stats.trades.map(t=>{
+          const statusColors={won:GN,lost:RD,open:T,cancelled:'#92400E'};
+          const statusBg={won:'#DCFCE7',lost:'#FEE2E2',open:TL,cancelled:'#FEF3C7'};
+          return`<div style="display:grid;grid-template-columns:1fr 70px 80px 70px 60px;padding:10px 12px;border-bottom:1px solid #F1F5F9;align-items:center;font-size:12px">
+            <div style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+              <div style="font-weight:600;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.marketTitle}</div>
+              <div style="font-size:10.5px;color:var(--tx3)">${t.outcomeLabel} · ${t.shares} shares @ ${Math.round(t.avg*100)}¢</div>
+            </div>
+            <div style="text-align:center"><span class="pill" style="background:${t.side==='yes'?'rgba(16,185,129,.07)':'rgba(239,68,68,.07)'};color:${t.side==='yes'?GN:RD}">${t.side.toUpperCase()}</span></div>
+            <span class="m" style="text-align:right;font-size:11.5px">$${(t.amount||0).toFixed(0)}</span>
+            <span class="m" style="text-align:right;font-weight:700;color:${t.pnl>=0?GN:RD};font-size:11.5px">${t.pnl>=0?'+':''}$${Math.abs(t.pnl).toFixed(0)}</span>
+            <div style="text-align:right"><span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:${statusBg[t.status]||'#F1F5F9'};color:${statusColors[t.status]||'var(--tx3)'};text-transform:uppercase;letter-spacing:.3px">${t.status}</span></div>
+          </div>`;
+        }).join('')}
+      </div>`}
+  </div></div>`;
+
+  document.getElementById('app').insertAdjacentHTML('beforeend',html);
+  document.getElementById('close-userprofile').onclick=()=>{S.viewingUser=null;render()};
+  document.getElementById('userprofile-overlay').onclick=e=>{if(e.target===e.currentTarget){S.viewingUser=null;render()}};
+}
+
+// ── ADD USER MODAL (admin only) ──
+function mountAddUser(){
+  let html=`<div class="overlay" id="adduser-overlay"><div class="modal" style="max-width:420px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px"><h2 style="font-size:16.5px;font-weight:700">➕ Add New User</h2><button class="xbtn" id="close-adduser">×</button></div>
+    <p style="font-size:12.5px;color:var(--tx2);margin-bottom:16px;line-height:1.5">Create a new user profile. They'll pick up this balance when they log in with this name.</p>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div><label style="font-size:11px;color:var(--tx2);margin-bottom:4px;display:block;font-weight:600">Name *</label><input id="new-user-name" placeholder="e.g. Jane D." value="${S.newUserName}"></div>
+      <div><label style="font-size:11px;color:var(--tx2);margin-bottom:4px;display:block;font-weight:600">Starting Balance</label><input type="number" id="new-user-balance" placeholder="10000" value="${S.newUserBalance}"></div>
+      <button class="btn btn-t" id="confirm-add-user" style="width:100%;padding:11px;font-size:13.5px">Add User</button>
+    </div>
+  </div></div>`;
+  document.getElementById('app').insertAdjacentHTML('beforeend',html);
+  document.getElementById('close-adduser').onclick=()=>{S.addingUser=false;render()};
+  document.getElementById('adduser-overlay').onclick=e=>{if(e.target===e.currentTarget){S.addingUser=false;render()}};
+  document.getElementById('new-user-name').oninput=e=>{S.newUserName=e.target.value};
+  document.getElementById('new-user-balance').oninput=e=>{S.newUserBalance=e.target.value};
+  document.getElementById('confirm-add-user').onclick=adminAddUser;
 }
 
 // ── MODAL MOUNTS ──
 function mountDetail(){
   const s=S,m=s.sel,admin=isAdmin(),canEdit=admin||m.creator===s.name;
-  let html=`<div class="overlay" id="detail-overlay"><div class="modal">
+
+  // Get recent trades on this market
+  const marketTrades=[...S.trades].filter(t=>t.mid===m.id).sort((a,b)=>b.ts-a.ts).slice(0,10);
+
+  let html=`<div class="overlay" id="detail-overlay"><div class="modal modal-lg">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">
       <div><div style="display:flex;gap:5px;margin-bottom:5px;flex-wrap:wrap">
         <span class="pill" style="background:${TL};color:${T}">${CI[m.category]||'🔮'} ${m.category}</span>
@@ -566,11 +894,27 @@ function mountDetail(){
       <button class="btn" id="trade-btn" style="width:100%;padding:10px;font-size:13.5px;background:${s.side==='yes'?GN:RD};color:#fff">Buy ${s.side.toUpperCase()}</button>
       <div style="font-size:10px;color:var(--tx3);text-align:center;margin-top:6px">Balance: $${s.portfolio.balance.toLocaleString()}</div>
     </div>`}
+
+    ${marketTrades.length>0?`
+      <div style="margin-top:16px">
+        <div style="font-size:11px;font-weight:600;color:var(--tx3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Recent Activity</div>
+        <div style="background:#F8FAFC;border-radius:8px;border:1px solid var(--bdr);overflow:hidden">
+          ${marketTrades.map(t=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid #EEF2F7;font-size:12px">
+            <div style="display:flex;align-items:center;gap:6px">
+              <span class="view-user-btn" data-user="${t.who}" style="font-weight:600;color:${T};cursor:pointer">${t.who}</span>
+              <span class="pill" style="background:${t.side==='yes'?'rgba(16,185,129,.07)':'rgba(239,68,68,.07)'};color:${t.side==='yes'?GN:RD};font-size:9px">${t.side.toUpperCase()}</span>
+              <span>${t.outcomeLabel}</span>
+              <span style="color:var(--tx3)">$${(t.amount||0).toFixed(0)}</span>
+            </div>
+            <span style="color:var(--tx3);font-size:10.5px">${timeAgo(t.ts)}</span>
+          </div>`).join('')}
+        </div>
+      </div>`:''}
+
     <div style="margin-top:10px;font-size:10.5px;color:var(--tx3);display:flex;justify-content:space-between"><span>by ${m.creator}</span><span>ends ${new Date(m.endDate).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}</span></div>
   </div></div>`;
   document.getElementById('app').insertAdjacentHTML('beforeend',html);
 
-  // ── FIX JITTER: Update preview WITHOUT re-rendering ──
   const amtInput=document.getElementById('trade-amount');
   const preview=document.getElementById('trade-preview');
   const tradeBtn=document.getElementById('trade-btn');
@@ -687,9 +1031,45 @@ function bindEvents(){
   document.querySelectorAll('.cat-btn').forEach(el=>{el.onclick=()=>{S.cat=el.dataset.cat;render()}});
   document.querySelectorAll('[data-market-id]').forEach(el=>{
     el.onclick=()=>{const m=S.markets.find(x=>x.id===parseInt(el.dataset.marketId));if(m){S.sel=m;S.selOc=0;S.side='yes';S.amt='';render()}}});
+
+  // View user profile (available everywhere)
+  document.querySelectorAll('.view-user-btn').forEach(el=>{
+    el.onclick=e=>{
+      e.stopPropagation();
+      S.viewingUser=el.dataset.user;render();
+    };
+  });
+
   // Admin panel events
   document.querySelectorAll('.add-funds-btn').forEach(el=>{
-    el.onclick=()=>{S.addFundsUser=el.dataset.user;S.addFundsAmt='';render()}});
+    el.onclick=e=>{e.stopPropagation();S.addFundsUser=el.dataset.user;S.addFundsAmt='';render()}});
+  document.querySelectorAll('.admin-delete-btn').forEach(el=>{
+    el.onclick=e=>{e.stopPropagation();adminDeleteUser(el.dataset.user)}});
+  document.getElementById('admin-add-user-btn')?.addEventListener('click',()=>{S.addingUser=true;render()});
+
+  // Admin: editable balance (click to edit)
+  document.querySelectorAll('.admin-balance-edit').forEach(el=>{
+    el.onclick=e=>{
+      e.stopPropagation();
+      S.editingBalance=el.dataset.user;
+      S.editBalanceVal=el.textContent.replace('$','').replace(/,/g,'');
+      render();
+      // Focus the input after render
+      setTimeout(()=>{
+        const inp=document.querySelector(`.admin-balance-input[data-user="${el.dataset.user}"]`);
+        if(inp){inp.focus();inp.select()}
+      },50);
+    };
+  });
+  // Admin: balance input handlers
+  document.querySelectorAll('.admin-balance-input').forEach(el=>{
+    el.onkeydown=e=>{
+      if(e.key==='Enter'){adminSetBalance(el.dataset.user,el.value)}
+      if(e.key==='Escape'){S.editingBalance=null;render()}
+    };
+    el.onblur=()=>{adminSetBalance(el.dataset.user,el.value)};
+  });
+
   if(document.getElementById('add-funds-amount'))
     document.getElementById('add-funds-amount').addEventListener('input',e=>{S.addFundsAmt=e.target.value});
   if(document.getElementById('add-funds-btn'))
@@ -699,8 +1079,8 @@ function bindEvents(){
 }
 
 // Start
+initActivityLog();
 init();
-// Check payouts after short delay
 setTimeout(()=>{if(S.name)checkPayouts()},2000);
 </script>
 </body>
