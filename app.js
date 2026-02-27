@@ -907,7 +907,7 @@ function renderMarkets(list,tv,tt,lb){
           <div style="font-size:11px;color:var(--tx3)">${new Date(m.endDate).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}</div>
         </div>
         <div style="font-size:15px;font-weight:700;line-height:1.35;margin-bottom:14px;letter-spacing:-.01em">${m.title}</div>
-        <div class="spark-area">${topOc[0]?.history?.length>1?spark(topOc[0].history,320,34,T):''}</div>
+        ${m.outcomes.length===2&&topOc[0]?.history?.length>1?`<div class="spark-area">${spark(topOc[0].history,320,34,T)}</div>`:''}
         <div style="display:flex;flex-direction:column;gap:2px;margin-bottom:12px">
           ${topOc.map((o,j)=>{const pct=Math.round(o.price*100),w=m.resolved&&m.winnerIdx===j;
             const tier=w?'winner':pct>=65?'high':pct<=35?'low':'mid';
