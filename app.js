@@ -633,12 +633,25 @@ function getLeagueTable(){
     const key=encodeKey(name);const ui=S.users[key]||S.users[name];
     const bal=ui?ui.balance:START_BAL;
     const ut=S.trades.filter(t=>t.who.toLowerCase()===name.toLowerCase());
-    let vol=0,w=0,l=0;
-    ut.forEach(t=>{vol+=(t.amount||0);const mk=S.markets.find(m=>m.id===t.mid);
-      if(mk&&mk.outcomes[t.outcomeIdx]&&mk.resolved&&!mk.cancelled){
-        const won=(t.side==='yes'&&t.outcomeIdx===mk.winnerIdx)||(t.side==='no'&&t.outcomeIdx!==mk.winnerIdx);
-        if(won)w++;else l++;}});
-    table.push({name,portfolioValue:Math.round(bal*100)/100,pnl:Math.round((bal-START_BAL)*100)/100,volume:vol,wins:w,losses:l,trades:ut.length});
+    let vol=0,w=0,l=0,openValue=0;
+    ut.forEach(t=>{
+      if(t.isSell)return; // skip sell records
+      vol+=Math.abs(t.amount||0);
+      const mk=S.markets.find(m=>m.id===t.mid);
+      if(mk&&mk.outcomes[t.outcomeIdx]){
+        if(mk.resolved&&!mk.cancelled){
+          const won=(t.side==='yes'&&t.outcomeIdx===mk.winnerIdx)||(t.side==='no'&&t.outcomeIdx!==mk.winnerIdx);
+          if(won)w++;else l++;
+        }else if(!mk.resolved){
+          // Value open positions at current market price
+          const curPrice=t.side==='yes'?mk.outcomes[t.outcomeIdx].price:(1-mk.outcomes[t.outcomeIdx].price);
+          openValue+=curPrice*t.shares;
+        }
+      }
+    });
+    const portfolioValue=Math.round((bal+openValue)*100)/100;
+    const pnl=Math.round((portfolioValue-START_BAL)*100)/100;
+    table.push({name,portfolioValue,cashBalance:Math.round(bal*100)/100,openValue:Math.round(openValue*100)/100,pnl,volume:vol,wins:w,losses:l,trades:ut.length});
   });
   table.sort((a,b)=>b.portfolioValue-a.portfolioValue);return table;
 }
@@ -821,7 +834,7 @@ function renderLeague(league,loser){
           </div>
           <div style="text-align:right">
             <div class="m" style="font-size:17px;font-weight:700;color:${p.portfolioValue>=START_BAL?GN:RD}">$${p.portfolioValue.toLocaleString()}</div>
-            <div style="font-size:10px;color:var(--tx3)">Balance</div>
+            <div style="font-size:10px;color:var(--tx3)">${p.openValue>0?`$${p.cashBalance.toLocaleString()} cash + $${p.openValue.toLocaleString()} open`:'Portfolio'}</div>
           </div>
         </div>`}).join('')}
     </div>
