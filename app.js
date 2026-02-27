@@ -3,9 +3,9 @@
 // ═══════════════════════════════════════════════════
 
 const ADMINS=["quincy m.","quincy mcdougal","admin"];
-const ANALYSTS=["Constantine","Luca","James","Quincy","Philip"];
+const ANALYSTS=["Constantine","Luca","James","Quincy","Phil"];
 // Alias map: any name variant → canonical analyst name (case-insensitive)
-const ALIASES={"phil":"Philip","phillip":"Philip","philip":"Philip"};
+const ALIASES={"philip":"Phil","phillip":"Phil","phil":"Phil"};
 function canonicalName(name){return ALIASES[(name||'').toLowerCase()]||name}
 const START_BAL=10000;
 const CATS=["All","Macro","Deals","Articles","Employees","Other"];
@@ -991,9 +991,9 @@ function mountEndSeason(){
 function renderMarkets(list,tv,tt,lb){
   const s=S;
   return`
-    <div class="stats-grid">
-      ${[{l:'Active Markets',v:s.markets.filter(m=>!m.resolved).length,c:T},{l:'Total Volume',v:tv?fmtMoney(tv):'$0',c:GN},{l:'Total Trades',v:tt,c:'#F59E0B'},{l:'Analysts',v:lb.length,c:'#6366F1'}].map((x,i)=>`
-        <div class="stat-card" style="animation:fadeUp .35s ease ${i*.06}s both"><div class="stat-label">${x.l}</div><div class="m" style="font-size:20px;font-weight:700;color:${x.c}">${x.v}</div></div>`).join('')}
+    <div style="background:linear-gradient(135deg,#1B8A9E 0%,#156F80 100%);border-radius:12px;padding:20px;margin-bottom:24px;display:grid;grid-template-columns:repeat(4,1fr);gap:16px">
+      ${[{l:'Active Markets',v:s.markets.filter(m=>!m.resolved).length},{l:'Total Volume',v:tv?fmtMoney(tv):'$0'},{l:'Total Trades',v:tt},{l:'Analysts',v:lb.length}].map((x,i)=>`
+        <div style="animation:fadeUp .35s ease ${i*.06}s both"><div style="font-size:11px;color:rgba(255,255,255,.6);font-weight:500;text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px">${x.l}</div><div class="m" style="font-size:22px;font-weight:700;color:#fff">${x.v}</div></div>`).join('')}
     </div>
     <div style="display:flex;gap:8px;margin-bottom:12px">
       <input id="search-input" placeholder="Search markets..." value="${s.q}" style="flex:1">
@@ -1033,23 +1033,54 @@ function renderMarkets(list,tv,tt,lb){
 
 function renderPortfolio(){
   const s=S;
+  // Separate open vs resolved positions
+  const openPos=[], closedPos=[];
+  s.portfolio.positions.forEach((p,pi)=>{
+    const mk=s.markets.find(m=>m.id===p.mid);
+    const resolved=mk&&mk.resolved;
+    (resolved?closedPos:openPos).push({...p,_idx:pi,_mk:mk,_resolved:resolved});
+  });
+
+  function posRow(p){
+    const mk=p._mk;let cur=p.avg;
+    const canSell=mk&&!mk.resolved;
+    if(mk&&mk.outcomes[p.outcomeIdx]){const op=mk.outcomes[p.outcomeIdx].price;cur=p.side==='yes'?op:(1-op)}
+    const pnl=(cur-p.avg)*p.shares;
+    return`<div style="background:var(--card);border:1px solid var(--bdr);border-radius:10px;padding:14px 16px;display:flex;justify-content:space-between;align-items:center;${p._resolved?'opacity:.6':''}">
+      <div style="min-width:0;flex:1"><div style="font-size:13px;font-weight:600;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.title}</div>
+        <div style="display:flex;gap:8px;font-size:11px;color:var(--tx3);align-items:center;flex-wrap:wrap"><span class="pill" style="background:${p.side==='yes'?'rgba(22,163,74,.08)':'rgba(220,38,38,.08)'};color:${p.side==='yes'?GN:RD}">${p.side.toUpperCase()}</span><span style="color:${T};font-weight:600">${p.outcomeLabel}</span><span class="m">${Math.round(p.shares)} @ ${Math.round(p.avg*100)}¢</span></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="text-align:right;flex-shrink:0"><div class="m" style="font-size:14px;font-weight:700;color:${pnl>=0?GN:RD}">${pnl>=0?'+':''}$${Math.abs(pnl).toFixed(0)}</div><div style="font-size:10px;color:var(--tx3)">now ${Math.round(cur*100)}¢</div></div>
+        ${canSell?`<button class="btn btn-ghost sell-pos-btn" data-pos-idx="${p._idx}" style="padding:5px 10px;font-size:11px;color:${RD};border-color:rgba(220,38,38,.25)">Sell</button>`:''}
+      </div>
+    </div>`}
+
+  // Calculate real P&L from positions
+  let totalOpenVal=0, totalCost=0;
+  s.portfolio.positions.forEach(p=>{
+    const mk=s.markets.find(m=>m.id===p.mid);
+    totalCost+=(p.amount||0);
+    if(mk&&mk.outcomes[p.outcomeIdx]){
+      const cur=p.side==='yes'?mk.outcomes[p.outcomeIdx].price:(1-mk.outcomes[p.outcomeIdx].price);
+      totalOpenVal+=cur*p.shares;
+    }
+  });
+  const netPnl=totalOpenVal+s.portfolio.balance-START_BAL;
+
   return`<h2 style="font-size:18px;font-weight:700;margin-bottom:18px">Your Portfolio</h2>
-    <div class="port-grid">${[{l:'Cash Balance',v:'$'+s.portfolio.balance.toLocaleString(),c:GN},{l:'Open Positions',v:s.portfolio.positions.length,c:T},{l:'Markets Traded',v:[...new Set(s.portfolio.positions.map(p=>p.mid))].length,c:'#F59E0B'}].map(x=>`<div class="stat-card"><div class="stat-label">${x.l}</div><div class="m" style="font-size:21px;font-weight:700;color:${x.c}">${x.v}</div></div>`).join('')}</div>
-    ${s.portfolio.positions.length===0?`<div style="text-align:center;padding:40px;color:var(--tx3);background:#fff;border:1px solid var(--bdr);border-radius:10px"><div style="font-size:32px;margin-bottom:8px">📈</div><div style="font-size:14px">No positions yet</div></div>`:`
-      <div style="display:flex;flex-direction:column;gap:8px">${s.portfolio.positions.map((p,pi)=>{
-        const mk=s.markets.find(m=>m.id===p.mid);let cur=p.avg;
-        const canSell=mk&&!mk.resolved;
-        if(mk&&mk.outcomes[p.outcomeIdx]){const op=mk.outcomes[p.outcomeIdx].price;cur=p.side==='yes'?op:(1-op)}
-        const pnl=(cur-p.avg)*p.shares;
-        return`<div style="background:#fff;border:1px solid var(--bdr);border-radius:8px;padding:13px 15px;display:flex;justify-content:space-between;align-items:center">
-          <div style="min-width:0;flex:1"><div style="font-size:13px;font-weight:600;margin-bottom:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.title}</div>
-            <div style="display:flex;gap:8px;font-size:11px;color:var(--tx3);align-items:center;flex-wrap:wrap"><span class="pill" style="background:${p.side==='yes'?'rgba(16,185,129,.07)':'rgba(239,68,68,.07)'};color:${p.side==='yes'?GN:RD}">${p.side.toUpperCase()}</span><span style="color:${T};font-weight:600">${p.outcomeLabel}</span><span>${p.shares} @ ${Math.round(p.avg*100)}¢</span></div>
-          </div>
-          <div style="display:flex;align-items:center;gap:12px">
-            <div style="text-align:right;flex-shrink:0"><div class="m" style="font-size:13.5px;font-weight:700;color:${pnl>=0?GN:RD}">${pnl>=0?'+':''}${pnl.toFixed(0)}</div><div style="font-size:10px;color:var(--tx3)">now ${Math.round(cur*100)}¢</div></div>
-            ${canSell?`<button class="btn btn-ghost sell-pos-btn" data-pos-idx="${pi}" style="padding:5px 10px;font-size:11px;color:${RD};border-color:rgba(239,68,68,.3)">Sell</button>`:''}
-          </div>
-        </div>`}).join('')}</div>`}`;
+    <div style="background:linear-gradient(135deg,#1B8A9E,#156F80);border-radius:12px;padding:20px;margin-bottom:20px;display:grid;grid-template-columns:repeat(4,1fr);gap:16px">
+      ${[{l:'Cash',v:'$'+s.portfolio.balance.toLocaleString()},{l:'Open Value',v:fmtMoney(totalOpenVal)},{l:'Net P&L',v:(netPnl>=0?'+':'')+fmtMoney(netPnl)},{l:'Positions',v:openPos.length+' open'}].map(x=>`<div><div style="font-size:11px;color:rgba(255,255,255,.6);font-weight:500;text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px">${x.l}</div><div class="m" style="font-size:20px;font-weight:700;color:#fff">${x.v}</div></div>`).join('')}
+    </div>
+    ${openPos.length>0?`<div style="margin-bottom:24px">
+      <div style="font-size:12px;font-weight:600;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em;margin-bottom:10px">Open Positions</div>
+      <div style="display:flex;flex-direction:column;gap:8px">${openPos.map(p=>posRow(p)).join('')}</div>
+    </div>`:''}
+    ${closedPos.length>0?`<div>
+      <div style="font-size:12px;font-weight:600;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em;margin-bottom:10px">Resolved</div>
+      <div style="display:flex;flex-direction:column;gap:8px">${closedPos.map(p=>posRow(p)).join('')}</div>
+    </div>`:''}
+    ${s.portfolio.positions.length===0?`<div style="text-align:center;padding:40px;color:var(--tx3);background:var(--card);border:1px solid var(--bdr);border-radius:10px"><div style="font-size:32px;margin-bottom:8px">📈</div><div style="font-size:14px">No positions yet</div></div>`:''}`;
 }
 
 function renderLeaderboard(lb){
