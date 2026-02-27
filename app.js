@@ -28,7 +28,7 @@ let S={
   markets:[],trades:[],users:{},seasons:[],currentSeason:null,
   portfolio:{balance:START_BAL,positions:[]},
   name:localStorage.getItem('cmdp_name')||'',nameIn:'',
-  view:'league',cat:'All',sort:'newest',q:'',
+  view:'markets',cat:'All',sort:'newest',q:'',
   sel:null,selOc:0,side:'yes',amt:'',
   creating:false,editing:null,resolving:null,adminPanel:false,
   addFundsUser:null,addFundsAmt:'',
@@ -257,7 +257,7 @@ function confirmName(){
 }
 
 function enterGuest(){
-  S.name='Guest';S.isGuest=true;S.view='league';render();
+  S.name='Guest';S.isGuest=true;S.view='markets';render();
 }
 
 function createMarket(){
@@ -642,13 +642,21 @@ function getLeagueTable(){
 }
 
 function fmtDate(ts){return new Date(ts).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}
+function fmtMoney(n){const a=Math.abs(n);if(a>=1000)return(n<0?'-':'')+'$'+(a/1000).toFixed(1)+'K';return(n<0?'-':'')+'$'+a.toFixed(0)}
 
 // ── SPARKLINE ──
 function spark(data,w,h,color){
   if(!data||data.length<2)return'';
   const mn=Math.min(...data)-.04,mx=Math.max(...data)+.04,rn=mx-mn||1,sx=w/(data.length-1);
   const pts=data.map((v,i)=>`${i*sx},${h-((v-mn)/rn)*h}`).join(' ');
-  return`<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="overflow:visible;flex-shrink:0"><polyline fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" points="${pts}"/><circle cx="${(data.length-1)*sx}" cy="${h-((data[data.length-1]-mn)/rn)*h}" r="2" fill="${color}"/></svg>`;
+  const areaPts=`0,${h} ${pts} ${(data.length-1)*sx},${h}`;
+  const lastY=h-((data[data.length-1]-mn)/rn)*h;
+  return`<svg width="100%" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="overflow:visible;display:block">
+    <defs><linearGradient id="sg${w}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${color}" stop-opacity=".12"/><stop offset="100%" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>
+    <polygon fill="url(#sg${w})" points="${areaPts}"/>
+    <polyline fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" points="${pts}"/>
+    <circle cx="${(data.length-1)*sx}" cy="${lastY}" r="2.5" fill="${color}"/>
+  </svg>`;
 }
 
 // ── LEADERBOARD ──
@@ -806,25 +814,24 @@ function renderLeague(league,loser){
         const isL=i===league.length-1&&league.length>1,isMe=p.name.toLowerCase()===s.name.toLowerCase();
         return`<div class="league-row ${isL?'is-loser':''} view-user-btn" data-user="${p.name}">
           <div class="league-rank" style="color:${i===0?'#F59E0B':i===1?'#94A3B8':i===2?'#CD7F32':'#CBD5E1'}">${medals[i]||(i+1)}</div>
-          <div style="display:flex;align-items:center;gap:10px">
-            <div style="width:34px;height:34px;border-radius:50%;background:${isL?RD:T};display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff">${p.name.slice(0,2).toUpperCase()}</div>
-            <div>
+          <div style="display:flex;align-items:center;gap:10px;min-width:0">
+            <div style="width:36px;height:36px;border-radius:50%;background:${isL?RD:T};display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;flex-shrink:0">${p.name.slice(0,2).toUpperCase()}</div>
+            <div style="min-width:0">
               <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
                 <span style="font-weight:700;font-size:14.5px">${p.name}</span>
                 ${isMe?`<span class="pill" style="background:${TL};color:${T}">YOU</span>`:''}
-                ${isL?'<span class="beer-badge">🍺 BUYING BEERS</span>':''}
-                ${i===0?'<span class="pill" style="background:#FEF3C7;color:#92400E">LEADER</span>':''}
+                ${isL?'<span class="beer-badge">🍺 BEERS</span>':''}
               </div>
-              <div style="font-size:11.5px;color:var(--tx3);margin-top:1px">${p.trades} trades · ${p.wins}W ${p.losses}L · $${p.volume.toFixed(0)} volume</div>
+              <div style="font-size:11.5px;color:var(--tx3);margin-top:1px">${p.trades} trades · ${p.wins}W/${p.losses}L</div>
             </div>
           </div>
           <div style="text-align:right">
-            <div class="m" style="font-size:17px;font-weight:700;color:${p.pnl>=0?GN:RD}">${p.pnl>=0?'+':''}$${Math.abs(p.pnl).toFixed(0)}</div>
+            <div class="m" style="font-size:14px;font-weight:700;color:${p.pnl>=0?GN:RD}">${p.pnl>=0?'+':''}${fmtMoney(p.pnl)}</div>
             <div style="font-size:10px;color:var(--tx3)">P&L</div>
           </div>
           <div style="text-align:right">
-            <div class="m" style="font-size:17px;font-weight:700;color:${p.portfolioValue>=START_BAL?GN:RD}">$${p.portfolioValue.toLocaleString()}</div>
-            <div style="font-size:10px;color:var(--tx3)">${p.openValue>0?`$${p.cashBalance.toLocaleString()} cash + $${p.openValue.toLocaleString()} open`:'Portfolio'}</div>
+            <div class="m" style="font-size:14px;font-weight:700">${fmtMoney(p.portfolioValue)}</div>
+            <div style="font-size:10px;color:var(--tx3)">${p.openValue>0?fmtMoney(p.cashBalance)+' + '+fmtMoney(p.openValue)+' open':'Portfolio'}</div>
           </div>
         </div>`}).join('')}
     </div>
@@ -878,31 +885,43 @@ function renderMarkets(list,tv,tt,lb){
   const s=S;
   return`
     <div class="stats-grid">
-      ${[{l:'Active Markets',v:s.markets.filter(m=>!m.resolved).length,c:T},{l:'Total Volume',v:tv?'$'+(tv/1000).toFixed(1)+'K':'$0',c:GN},{l:'Total Trades',v:tt,c:'#F59E0B'},{l:'Analysts',v:lb.length,c:'#6366F1'}].map((x,i)=>`
-        <div class="stat-card" style="animation:fu .3s ease ${i*.05}s both"><div class="stat-label">${x.l}</div><div class="m" style="font-size:20px;font-weight:700;color:${x.c}">${x.v}</div></div>`).join('')}
+      ${[{l:'Active Markets',v:s.markets.filter(m=>!m.resolved).length,c:T},{l:'Total Volume',v:tv?fmtMoney(tv):'$0',c:GN},{l:'Total Trades',v:tt,c:'#F59E0B'},{l:'Analysts',v:lb.length,c:'#6366F1'}].map((x,i)=>`
+        <div class="stat-card" style="animation:fadeUp .35s ease ${i*.06}s both"><div class="stat-label">${x.l}</div><div class="m" style="font-size:20px;font-weight:700;color:${x.c}">${x.v}</div></div>`).join('')}
     </div>
     <div style="display:flex;gap:8px;margin-bottom:12px">
       <input id="search-input" placeholder="Search markets..." value="${s.q}" style="flex:1">
       <select id="sort-select" style="width:auto;min-width:115px"><option value="newest" ${s.sort==='newest'?'selected':''}>Newest</option><option value="volume" ${s.sort==='volume'?'selected':''}>Volume</option></select>
     </div>
     <div style="display:flex;gap:4px;margin-bottom:18px;flex-wrap:wrap">
-      ${CATS.map(c=>`<button class="cat-btn" data-cat="${c}" style="padding:3px 9px;border-radius:4px;font-size:11px;font-weight:500;cursor:pointer;font-family:'Source Sans 3',sans-serif;border:1px solid ${s.cat===c?T:'var(--bdr)'};background:${s.cat===c?TL:'transparent'};color:${s.cat===c?T:'var(--tx2)'}">${c!=='All'?CI[c]+' ':''}${c}</button>`).join('')}
+      ${CATS.map(c=>`<button class="cat-btn" data-cat="${c}" style="padding:4px 12px;border-radius:20px;font-size:12px;font-weight:500;cursor:pointer;font-family:inherit;border:1px solid ${s.cat===c?T:'var(--bdr)'};background:${s.cat===c?TL:'transparent'};color:${s.cat===c?T:'var(--tx2)'};transition:all .1s">${c!=='All'?CI[c]+' ':''}${c}</button>`).join('')}
     </div>
-    ${list.length===0?`<div style="text-align:center;padding:50px 20px;background:#fff;border:1px solid var(--bdr);border-radius:10px"><div style="font-size:40px;margin-bottom:12px">🏛️</div><div style="font-size:16px;font-weight:600;margin-bottom:6px">${s.markets.length===0?'No markets yet':'No matches'}</div><div style="font-size:13px;color:var(--tx2);max-width:360px;margin:0 auto 20px">${s.markets.length===0?'Create the first prediction market.':'Try a different filter.'}</div>${s.markets.length===0?'<button class="btn btn-t" id="first-market-btn">Create First Market</button>':''}</div>`
-    :`<div class="market-grid">${list.map((m,i)=>`
-      <div class="card" data-market-id="${m.id}" style="animation-delay:${i*.035}s;${m.resolved?'opacity:.65':''}">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px"><div style="display:flex;gap:5px;flex-wrap:wrap">
-          <span class="pill" style="background:${TL};color:${T}">${CI[m.category]||'🔮'} ${m.category}</span>
-          <span class="pill" style="background:#F0F4FF;color:#6366F1">${m.outcomes.length} outcomes</span>
-          ${m.resolved?`<span class="${m.cancelled?'cancelled-badge':'resolved-badge'}">${m.cancelled?'CANCELLED':'RESOLVED'}</span>`:''}</div></div>
-        <div style="font-size:14px;font-weight:600;line-height:1.4;margin-bottom:12px;min-height:36px">${m.title}</div>
-        <div style="display:flex;flex-direction:column;gap:4px;margin-bottom:10px">
-          ${m.outcomes.slice(0,3).map((o,j)=>{const pct=Math.round(o.price*100),w=m.resolved&&m.winnerIdx===j;
-            return`<div style="display:flex;align-items:center;gap:8px"><div style="font-size:12px;color:${w?GN:'#334155'};font-weight:${w?700:500};min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${w?'✓ ':''}${o.label}</div><div style="flex:1;height:6px;border-radius:3px;background:#EEF2F7;overflow:hidden"><div style="height:100%;border-radius:3px;background:${w?GN:T};width:${pct}%"></div></div><span class="m" style="font-size:12px;font-weight:700;color:${w?GN:T};min-width:32px;text-align:right">${pct}¢</span></div>`}).join('')}
-          ${m.outcomes.length>3?`<div style="font-size:11px;color:var(--tx3)">+${m.outcomes.length-3} more</div>`:''}
+    ${list.length===0?`<div style="text-align:center;padding:60px 20px;background:#fff;border:1px solid var(--bdr);border-radius:12px"><div style="font-size:40px;margin-bottom:12px">🏛️</div><div style="font-size:16px;font-weight:600;margin-bottom:6px">${s.markets.length===0?'No markets yet':'No matches'}</div><div style="font-size:13.5px;color:var(--tx2);max-width:360px;margin:0 auto 20px">${s.markets.length===0?'Create the first prediction market.':'Try a different filter.'}</div>${s.markets.length===0?'<button class="btn btn-t" id="first-market-btn">Create First Market</button>':''}</div>`
+    :`<div class="market-grid">${list.map((m,i)=>{
+      const topOc=m.outcomes.slice(0,3);
+      return`<div class="card" data-market-id="${m.id}" style="animation-delay:${i*.04}s;${m.resolved?'opacity:.6':''}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">
+          <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center">
+            <span class="pill" style="background:${TL};color:${T}">${CI[m.category]||'🔮'} ${m.category}</span>
+            ${m.resolved?`<span class="${m.cancelled?'cancelled-badge':'resolved-badge'}">${m.cancelled?'Cancelled':'Resolved'}</span>`:''}
+          </div>
+          <div style="font-size:11px;color:var(--tx3)">${new Date(m.endDate).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}</div>
         </div>
-        <div style="font-size:10.5px;color:#B0B8C4;display:flex;gap:8px;flex-wrap:wrap"><span>by ${m.creator}</span>${m.volume?`<span>· $${(m.volume/1000).toFixed(1)}K vol</span>`:''}<span>· ${m.traders||0} trades</span><span>· ends ${new Date(m.endDate).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}</span></div>
-      </div>`).join('')}</div>`}`;
+        <div style="font-size:15px;font-weight:700;line-height:1.35;margin-bottom:14px;letter-spacing:-.01em">${m.title}</div>
+        <div class="spark-area">${topOc[0]?.history?.length>1?spark(topOc[0].history,320,34,T):''}</div>
+        <div style="display:flex;flex-direction:column;gap:2px;margin-bottom:12px">
+          ${topOc.map((o,j)=>{const pct=Math.round(o.price*100),w=m.resolved&&m.winnerIdx===j;
+            const tier=w?'winner':pct>=65?'high':pct<=35?'low':'mid';
+            return`<div class="mkt-outcome">
+              <span class="mkt-outcome-label ${w?'winner':''}">${w?'✓ ':''}${o.label}</span>
+              <span class="mkt-odds ${tier}">${w?'WON':pct+'%'}</span>
+            </div>`}).join('')}
+          ${m.outcomes.length>3?`<div style="font-size:11px;color:var(--tx3);padding:2px 0">+${m.outcomes.length-3} more</div>`:''}
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--tx3);padding-top:10px;border-top:1px solid #F1F5F9">
+          <span>${m.creator}</span>
+          <div style="display:flex;gap:10px">${m.volume?`<span>${fmtMoney(m.volume)} vol</span>`:''}<span>${m.traders||0} trades</span></div>
+        </div>
+      </div>`}).join('')}</div>`}`;
 }
 
 function renderPortfolio(){
