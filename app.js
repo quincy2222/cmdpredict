@@ -197,11 +197,9 @@ function cpmmBuy(market, oi, side, amount){
   const dir = side==='yes' ? 1 : -1;
   m.outcomes[oi].pool = (m.outcomes[oi].pool||0) + dir*shares;
 
-  // Recalculate price for ALL outcomes (each independently)
-  m.outcomes.forEach(o=>{
-    o.price = outcomePrice(o.pool||0, b);
-    o.history = [...(o.history||[o.price]), o.price];
-  });
+  // Recalculate price ONLY for the traded outcome
+  m.outcomes[oi].price = outcomePrice(m.outcomes[oi].pool, b);
+  m.outcomes[oi].history = [...(m.outcomes[oi].history||[m.outcomes[oi].price]), m.outcomes[oi].price];
 
   m.volume=(m.volume||0)+amount;
   m.traders=(m.traders||0)+1;
@@ -222,11 +220,9 @@ function cpmmSell(market, oi, side, shares){
   const dir = side==='yes' ? -1 : 1;
   m.outcomes[oi].pool = (m.outcomes[oi].pool||0) + dir*shares;
 
-  // Recalculate prices
-  m.outcomes.forEach(o=>{
-    o.price = outcomePrice(o.pool||0, b);
-    o.history = [...(o.history||[o.price]), o.price];
-  });
+  // Recalculate price ONLY for the sold outcome
+  m.outcomes[oi].price = outcomePrice(m.outcomes[oi].pool, b);
+  m.outcomes[oi].history = [...(m.outcomes[oi].history||[m.outcomes[oi].price]), m.outcomes[oi].price];
 
   m.volume=(m.volume||0)+saleValue;
 
@@ -265,9 +261,8 @@ function createMarket(){
   if(!f.title||!f.end){flash("Title and end date required","err");return}
   const labels=f.outcomes.filter(o=>o.trim());
   if(labels.length<2){flash("Need at least 2 outcomes","err");return}
-  const ip=Math.round((1/labels.length)*100)/100;
   const m={id:Date.now(),title:f.title,description:f.desc||"No resolution criteria specified.",category:f.cat,endDate:f.end,creator:S.name,
-    outcomes:labels.map(l=>({label:l,price:ip,pool:100,history:[ip]})),
+    outcomes:labels.map(l=>({label:l,price:.5,pool:0,history:[.5]})),
     volume:0,liquidity:1000,traders:0,resolved:false,winnerIdx:null,createdAt:new Date().toISOString()};
   S.markets=[m,...S.markets];saveMarkets(S.markets);
   logActivity({type:'market_created',user:S.name,marketId:m.id,desc:`${S.name} created market: "${f.title}"`});
@@ -331,15 +326,12 @@ function saveEdit(){
   if(labels.length<2){flash("Need at least 2 outcomes","err");return}
   const m=S.markets.find(x=>x.id===S.editing.id);if(!m)return;
   const u=JSON.parse(JSON.stringify(m));
+  const b=u.liquidity?u.liquidity*1.5:1500;
   u.outcomes=labels.map(label=>{
     const ex=u.outcomes.find(o=>o.label===label);
-    if(ex)return ex;
-    return{label,price:1/labels.length,pool:100,history:[1/labels.length]};
+    if(ex)return ex; // Keep existing outcome with its pool/price/history intact
+    return{label,price:.5,pool:0,history:[.5]}; // New outcome starts at 50%
   });
-  const tp=u.outcomes.reduce((s,o)=>s+(o.pool||100),0);
-  u.outcomes.forEach(o=>{o.price=Math.max(.01,Math.round(((o.pool||100)/tp)*100)/100)});
-  const ps=u.outcomes.reduce((s,o)=>s+o.price,0);
-  u.outcomes.forEach(o=>{o.price=Math.round((o.price/ps)*100)/100});
   if(ef.title)u.title=ef.title;if(ef.desc)u.description=ef.desc;if(ef.end)u.endDate=ef.end;
   S.markets=S.markets.map(x=>x.id===u.id?u:x);saveMarkets(S.markets);
   S.editing=null;S.sel=u;flash("Market updated!");
@@ -657,6 +649,114 @@ function spark(data,w,h,color){
     <polyline fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" points="${pts}"/>
     <circle cx="${(data.length-1)*sx}" cy="${lastY}" r="2.5" fill="${color}"/>
   </svg>`;
+}
+
+// ── Interactive Chart (canvas-based with hover tooltip) ──
+function mountInteractiveChart(canvasId, data, color, marketTrades, outcomeLabel){
+  const canvas=document.getElementById(canvasId);
+  if(!canvas||!data||data.length<2)return;
+  const ctx=canvas.getContext('2d');
+  const dpr=window.devicePixelRatio||1;
+  const rect=canvas.parentElement.getBoundingClientRect();
+  const W=rect.width, H=120;
+  canvas.width=W*dpr; canvas.height=H*dpr;
+  canvas.style.width=W+'px'; canvas.style.height=H+'px';
+  ctx.scale(dpr,dpr);
+
+  const pad={t:20,r:12,b:24,l:40};
+  const cw=W-pad.l-pad.r, ch=H-pad.t-pad.b;
+  const mn=Math.min(...data)-.05, mx=Math.max(...data)+.05, rn=mx-mn||1;
+
+  // Find related trades for timestamp mapping
+  const relTrades=marketTrades||[];
+  
+  function xFor(i){return pad.l+(i/(data.length-1))*cw}
+  function yFor(v){return pad.t+ch-(((v-mn)/rn)*ch)}
+
+  function draw(hoverIdx){
+    ctx.clearRect(0,0,W,H);
+
+    // Grid lines
+    ctx.strokeStyle='#E8ECF1';ctx.lineWidth=0.5;
+    const gridSteps=[.25,.5,.75];
+    gridSteps.forEach(frac=>{
+      const gv=mn+rn*frac, gy=yFor(gv);
+      ctx.beginPath();ctx.moveTo(pad.l,gy);ctx.lineTo(W-pad.r,gy);ctx.stroke();
+      ctx.fillStyle='#9CA3B4';ctx.font='10px IBM Plex Mono,monospace';ctx.textAlign='right';
+      ctx.fillText(Math.round(gv*100)+'%',pad.l-6,gy+3);
+    });
+
+    // Area fill
+    ctx.beginPath();
+    ctx.moveTo(xFor(0),H-pad.b);
+    data.forEach((v,i)=>ctx.lineTo(xFor(i),yFor(v)));
+    ctx.lineTo(xFor(data.length-1),H-pad.b);
+    ctx.closePath();
+    const grad=ctx.createLinearGradient(0,pad.t,0,H-pad.b);
+    grad.addColorStop(0,color+'25');grad.addColorStop(1,color+'05');
+    ctx.fillStyle=grad;ctx.fill();
+
+    // Line
+    ctx.beginPath();
+    ctx.strokeStyle=color;ctx.lineWidth=2;ctx.lineJoin='round';ctx.lineCap='round';
+    data.forEach((v,i)=>{if(i===0)ctx.moveTo(xFor(i),yFor(v));else ctx.lineTo(xFor(i),yFor(v))});
+    ctx.stroke();
+
+    // End dot
+    const lastX=xFor(data.length-1),lastYp=yFor(data[data.length-1]);
+    ctx.beginPath();ctx.arc(lastX,lastYp,3.5,0,Math.PI*2);ctx.fillStyle=color;ctx.fill();
+    ctx.beginPath();ctx.arc(lastX,lastYp,2,0,Math.PI*2);ctx.fillStyle='#fff';ctx.fill();
+
+    // Current price label
+    ctx.fillStyle=color;ctx.font='bold 11px IBM Plex Mono,monospace';ctx.textAlign='left';
+    ctx.fillText(Math.round(data[data.length-1]*100)+'%',lastX+8,lastYp+4);
+
+    // Hover crosshair & tooltip
+    if(hoverIdx!=null&&hoverIdx>=0&&hoverIdx<data.length){
+      const hx=xFor(hoverIdx),hy=yFor(data[hoverIdx]);
+      // Vertical line
+      ctx.strokeStyle='#94A3B8';ctx.lineWidth=1;ctx.setLineDash([3,3]);
+      ctx.beginPath();ctx.moveTo(hx,pad.t);ctx.lineTo(hx,H-pad.b);ctx.stroke();
+      ctx.setLineDash([]);
+      // Horizontal line
+      ctx.strokeStyle='#94A3B8';ctx.lineWidth=0.5;ctx.setLineDash([3,3]);
+      ctx.beginPath();ctx.moveTo(pad.l,hy);ctx.lineTo(W-pad.r,hy);ctx.stroke();
+      ctx.setLineDash([]);
+      // Dot
+      ctx.beginPath();ctx.arc(hx,hy,5,0,Math.PI*2);ctx.fillStyle=color;ctx.fill();
+      ctx.beginPath();ctx.arc(hx,hy,2.5,0,Math.PI*2);ctx.fillStyle='#fff';ctx.fill();
+      // Tooltip box
+      const pct=Math.round(data[hoverIdx]*100);
+      const tradeNum=hoverIdx+1;
+      const label=pct+'% · Trade #'+tradeNum;
+      ctx.font='bold 11px DM Sans,system-ui,sans-serif';
+      const tw=ctx.measureText(label).width+16;
+      let tx=hx-tw/2,ty=hy-28;
+      if(tx<pad.l)tx=pad.l;if(tx+tw>W-pad.r)tx=W-pad.r-tw;if(ty<4)ty=hy+12;
+      // Draw rounded rect (compatible fallback)
+      const tR=6,tH=22;
+      ctx.fillStyle='#0F1729';ctx.beginPath();
+      ctx.moveTo(tx+tR,ty);ctx.lineTo(tx+tw-tR,ty);ctx.quadraticCurveTo(tx+tw,ty,tx+tw,ty+tR);
+      ctx.lineTo(tx+tw,ty+tH-tR);ctx.quadraticCurveTo(tx+tw,ty+tH,tx+tw-tR,ty+tH);
+      ctx.lineTo(tx+tR,ty+tH);ctx.quadraticCurveTo(tx,ty+tH,tx,ty+tH-tR);
+      ctx.lineTo(tx,ty+tR);ctx.quadraticCurveTo(tx,ty,tx+tR,ty);ctx.fill();
+      ctx.fillStyle='#fff';ctx.textAlign='center';
+      ctx.fillText(label,tx+tw/2,ty+15);
+    }
+  }
+
+  draw(null);
+
+  // Mouse & touch events
+  function getIdx(clientX){
+    const br=canvas.getBoundingClientRect();
+    const mx2=clientX-br.left;
+    return Math.max(0,Math.min(data.length-1,Math.round(((mx2-pad.l)/cw)*(data.length-1))));
+  }
+  canvas.onmousemove=e=>{draw(getIdx(e.clientX));canvas.style.cursor='crosshair'};
+  canvas.onmouseleave=()=>{draw(null);canvas.style.cursor='default'};
+  canvas.ontouchmove=e=>{e.preventDefault();if(e.touches[0])draw(getIdx(e.touches[0].clientX))};
+  canvas.ontouchend=()=>draw(null);
 }
 
 // ── LEADERBOARD ──
@@ -1185,13 +1285,23 @@ function mountDetail(){
       ${m.outcomes.map((o,j)=>{const pct=Math.round(o.price*100),active=s.selOc===j,w=m.resolved&&m.winnerIdx===j;
         const hasChart=o.history&&o.history.length>1;
         const isBinary=m.outcomes.length===2;
+        const showByDefault=isBinary;
         return`<div>
           <div class="outcome-row" data-idx="${j}" style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;cursor:pointer;border:2px solid ${active&&!m.resolved?T:'transparent'};background:${w?'#F0FDF4':active?'var(--tll)':'#F8FAFC'}">
-          <div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:6px;font-size:13.5px;font-weight:600;color:${w?GN:'var(--tx)'}">${w?'✓ ':''}${o.label}${hasChart&&!isBinary?`<button class="spark-toggle" data-oc="${j}" style="background:none;border:1px solid var(--bdr);border-radius:4px;padding:1px 6px;font-size:10px;color:var(--tx3);cursor:pointer;font-family:inherit;transition:all .1s" title="Toggle chart">📈</button>`:''}</div><div style="height:4px;border-radius:2px;background:#E2E8F0;overflow:hidden;margin-top:6px"><div style="height:100%;border-radius:2px;background:${w?GN:T};width:${pct}%"></div></div></div>
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;gap:8px;font-size:13.5px;font-weight:600;color:${w?GN:'var(--tx)'}">
+              ${w?'✓ ':''}${o.label}
+              ${hasChart?`<button class="chart-toggle" data-oc="${j}" style="display:inline-flex;align-items:center;gap:4px;background:${showByDefault?'var(--tl)':'#F1F5F9'};border:1px solid ${showByDefault?T:'var(--bdr)'};border-radius:6px;padding:3px 8px;font-size:10.5px;color:${showByDefault?T:'var(--tx3)'};cursor:pointer;font-family:inherit;transition:all .12s;font-weight:500"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M1 9L4 5L7 7L11 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Chart</button>`:''}
+            </div>
+            <div style="height:4px;border-radius:2px;background:#E2E8F0;overflow:hidden;margin-top:6px"><div style="height:100%;border-radius:2px;background:${w?GN:T};width:${pct}%"></div></div>
+          </div>
           <div style="text-align:right;flex-shrink:0"><div class="m" style="font-size:18px;font-weight:700;color:${w?GN:T}">${pct}¢</div></div>
         </div>
-        ${isBinary&&hasChart?`<div style="padding:2px 12px 6px">${spark(o.history,280,28,w?GN:T)}</div>`:''}
-        <div class="spark-panel" data-oc="${j}" style="display:none;padding:2px 12px 8px">${hasChart?spark(o.history,280,28,w?GN:T):''}</div>
+        <div class="chart-panel" data-oc="${j}" style="display:${showByDefault&&hasChart?'block':'none'};padding:4px 0 8px;margin:0 4px">
+          <div style="background:#FAFBFC;border:1px solid var(--bdr);border-radius:8px;padding:8px;position:relative">
+            <canvas id="chart-${j}" style="width:100%;display:block"></canvas>
+          </div>
+        </div>
         </div>`}).join('')}
     </div>
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:16px">
@@ -1250,12 +1360,35 @@ function mountDetail(){
   document.getElementById('close-detail').onclick=()=>{S.sel=null;render()};
   document.getElementById('detail-overlay').onclick=e=>{if(e.target===e.currentTarget){S.sel=null;render()}};
   document.querySelectorAll('.outcome-row').forEach(el=>{el.onclick=()=>{if(!S.sel.resolved){S.selOc=parseInt(el.dataset.idx);S.side='yes';render()}}});
-  document.querySelectorAll('.spark-toggle').forEach(el=>{
+  document.querySelectorAll('.chart-toggle').forEach(el=>{
     el.onclick=e=>{
       e.stopPropagation();
-      const panel=document.querySelector(`.spark-panel[data-oc="${el.dataset.oc}"]`);
-      if(panel){panel.style.display=panel.style.display==='none'?'block':'none';el.style.background=panel.style.display==='none'?'none':'var(--tl)'}
+      const j=el.dataset.oc;
+      const panel=document.querySelector(`.chart-panel[data-oc="${j}"]`);
+      if(panel){
+        const showing=panel.style.display!=='none';
+        panel.style.display=showing?'none':'block';
+        el.style.background=showing?'#F1F5F9':'var(--tl)';
+        el.style.borderColor=showing?'var(--bdr)':T;
+        el.style.color=showing?'var(--tx3)':T;
+        if(!showing){
+          // Mount chart when first shown
+          const oc=m.outcomes[parseInt(j)];
+          const w2=m.resolved&&m.winnerIdx===parseInt(j);
+          if(oc&&oc.history&&oc.history.length>1){
+            setTimeout(()=>mountInteractiveChart('chart-'+j,oc.history,w2?GN:T,marketTrades,oc.label),50);
+          }
+        }
+      }
     };
+  });
+  // Mount charts that are visible by default (binary markets)
+  m.outcomes.forEach((o,j)=>{
+    const panel=document.querySelector(`.chart-panel[data-oc="${j}"]`);
+    if(panel&&panel.style.display!=='none'&&o.history&&o.history.length>1){
+      const w2=m.resolved&&m.winnerIdx===j;
+      mountInteractiveChart('chart-'+j,o.history,w2?GN:T,marketTrades,o.label);
+    }
   });
   document.querySelectorAll('.side-btn').forEach(el=>{el.onclick=e=>{e.stopPropagation();S.side=el.dataset.side;render()}});
   if(tradeBtn)tradeBtn.onclick=trade;
