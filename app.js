@@ -3,7 +3,10 @@
 // ═══════════════════════════════════════════════════
 
 const ADMINS=["quincy m.","quincy mcdougal","admin"];
-const ANALYSTS=["Constantine","Luca","James","Quincy","Phil"];
+const ANALYSTS=["Constantine","Luca","James","Quincy","Philip"];
+// Alias map: any name variant → canonical analyst name (case-insensitive)
+const ALIASES={"phil":"Philip","phillip":"Philip","philip":"Philip"};
+function canonicalName(name){return ALIASES[(name||'').toLowerCase()]||name}
 const START_BAL=10000;
 const CATS=["All","Macro","Deals","Articles","Employees","Other"];
 const CI={Macro:"🌍",Deals:"🤝",Articles:"📝",Employees:"👥",Other:"🔮"};
@@ -608,8 +611,12 @@ function getLeagueTable(){
   const table=[];
   ANALYSTS.forEach(name=>{
     const key=encodeKey(name);const ui=S.users[key]||S.users[name];
-    const bal=ui?ui.balance:START_BAL;
-    const ut=S.trades.filter(t=>t.who.toLowerCase()===name.toLowerCase());
+    // Also check for aliased user data
+    const aliasKeys=Object.entries(ALIASES).filter(([,v])=>v===name).map(([k])=>encodeKey(k));
+    let bal=ui?ui.balance:START_BAL;
+    if(!ui){for(const ak of aliasKeys){const au=S.users[ak];if(au){bal=au.balance;break}}}
+    // Match trades by canonical name
+    const ut=S.trades.filter(t=>canonicalName(t.who)===name);
     let vol=0,w=0,l=0,openValue=0;
     ut.forEach(t=>{
       if(t.isSell)return; // skip sell records
