@@ -40,6 +40,8 @@ let S={
   editingBalance:null,editBalanceVal:'',
   // Season admin
   endingSeasonModal:false,
+  // Guest mode
+  isGuest:false,
   notif:null,
   form:{title:'',desc:'',cat:'Other',end:'',outcomes:['Yes','No']},
   editForm:{outcomes:[]},
@@ -183,7 +185,7 @@ function ammCost(outcomes, oi, shares, side, b){
 
 function cpmmBuy(market, oi, side, amount){
   const m=JSON.parse(JSON.stringify(market));
-  const b=m.liquidity?m.liquidity/10:100; // liquidity parameter
+  const b=m.liquidity?m.liquidity*1.5:1500; // liquidity parameter
 
   // Binary search for how many shares `amount` buys
   let lo=0, hi=amount*20, shares=0;
@@ -215,7 +217,7 @@ function cpmmBuy(market, oi, side, amount){
 // Sell: reverse operation — remove shares from pools, return cash
 function cpmmSell(market, oi, side, shares){
   const m=JSON.parse(JSON.stringify(market));
-  const b=m.liquidity?m.liquidity/10:100;
+  const b=m.liquidity?m.liquidity*1.5:1500;
 
   // Calculate the refund (negative cost = money back)
   const cost=ammCost(m.outcomes, oi, shares, side, b);
@@ -249,9 +251,28 @@ function cpmmSell(market, oi, side, shares){
 // ── ACTIONS ──
 function confirmName(){
   if(!S.nameIn.trim())return;S.name=S.nameIn.trim();localStorage.setItem('cmdp_name',S.name);
-  savePortfolio();
-  logActivity({type:'join',user:S.name,desc:`${S.name} joined CMDpredict`});
-  render();
+  // Sync balance from Firebase if available
+  const key=encodeKey(S.name);
+  if(useFirebase){
+    db.ref('users/'+key).once('value',snap=>{
+      const u=snap.val();
+      if(u&&u.balance!=null){
+        S.portfolio.balance=u.balance;
+      }
+      savePortfolio();
+      if(!S.isGuest) logActivity({type:'join',user:S.name,desc:`${S.name} joined CMDpredict`});
+      checkPayouts();
+      render();
+    });
+  }else{
+    savePortfolio();
+    logActivity({type:'join',user:S.name,desc:`${S.name} joined CMDpredict`});
+    render();
+  }
+}
+
+function enterGuest(){
+  S.name='Guest';S.isGuest=true;S.view='league';render();
 }
 
 function createMarket(){
@@ -347,40 +368,45 @@ function resolveMarket(winnerIdx){
   u.outcomes.forEach((o,i)=>{o.price=i===winnerIdx?1:0;o.history=[...(o.history||[]),o.price]});
   S.markets=S.markets.map(x=>x.id===u.id?u:x);saveMarkets(S.markets);
 
-  let payout=0;
-  S.portfolio.positions.forEach(p=>{
-    if(p.mid!==u.id)return;
-    const won=(p.side==='yes'&&p.outcomeIdx===winnerIdx)||(p.side==='no'&&p.outcomeIdx!==winnerIdx);
-    if(won)payout+=p.shares;
-  });
-  if(payout>0){
-    S.portfolio.balance=Math.round((S.portfolio.balance+payout)*100)/100;
-    savePortfolio();
-  }
-
+  // Calculate payouts per user from ALL trades on this market
   const payoutsByUser={};
   S.trades.forEach(t=>{
-    if(t.mid!==u.id)return;
+    if(t.mid!==u.id||t.isSell)return;
     const won=(t.side==='yes'&&t.outcomeIdx===winnerIdx)||(t.side==='no'&&t.outcomeIdx!==winnerIdx);
     if(!payoutsByUser[t.who])payoutsByUser[t.who]=0;
     if(won)payoutsByUser[t.who]+=t.shares;
   });
-  if(useFirebase){
-    Object.entries(payoutsByUser).forEach(([who,amt])=>{
-      if(amt>0){
-        db.ref('payouts/'+u.id+'_'+encodeKey(who)).set({
-          mid:u.id,who,amount:Math.round(amt*100)/100,marketTitle:u.title,
-          winner:u.outcomes[winnerIdx].label,ts:Date.now(),claimed:false
-        });
-      }
-    });
-  }
+
+  // Directly update each user's balance in Firebase — no IOUs
+  Object.entries(payoutsByUser).forEach(([who,amt])=>{
+    if(amt<=0)return;
+    const rounded=Math.round(amt*100)/100;
+    const key=encodeKey(who);
+    if(useFirebase){
+      db.ref('users/'+key).once('value',snap=>{
+        const userData=snap.val()||{name:who,balance:START_BAL};
+        userData.balance=Math.round((userData.balance+rounded)*100)/100;
+        db.ref('users/'+key).set(userData);
+      });
+    }else{
+      const userData=S.users[key]||{name:who,balance:START_BAL};
+      userData.balance=Math.round((userData.balance+rounded)*100)/100;
+      S.users[key]=userData;
+      localStorage.setItem('cmdp_users',JSON.stringify(S.users));
+    }
+    // Update local portfolio if it's us
+    if(who.toLowerCase()===S.name.toLowerCase()){
+      S.portfolio.balance=Math.round((S.portfolio.balance+rounded)*100)/100;
+      savePortfolio();
+    }
+  });
 
   logActivity({type:'resolve',user:S.name,marketId:u.id,winner:u.outcomes[winnerIdx].label,
     desc:`${S.name} resolved "${u.title}" → ${u.outcomes[winnerIdx].label} wins`});
 
   S.resolving=null;S.sel=u;
-  flash(`Resolved: "${u.outcomes[winnerIdx].label}" wins! Payouts distributed.`);
+  const payoutSummary=Object.entries(payoutsByUser).filter(([,a])=>a>0).map(([who,amt])=>`${who}: +$${Math.round(amt)}`).join(', ');
+  flash(`Resolved! ${payoutSummary||'No payouts.'}`);
 }
 
 function cancelMarket(){
@@ -389,17 +415,37 @@ function cancelMarket(){
   u.resolved=true;u.cancelled=true;u.resolvedAt=new Date().toISOString();u.resolvedBy=S.name;
   S.markets=S.markets.map(x=>x.id===u.id?u:x);saveMarkets(S.markets);
 
-  let refund=0;
-  S.portfolio.positions.forEach(p=>{if(p.mid===u.id)refund+=p.amount||0});
-  if(refund>0){S.portfolio.balance=Math.round((S.portfolio.balance+refund)*100)/100;savePortfolio()}
+  // Calculate refunds per user from ALL trades
+  const refundsByUser={};
+  S.trades.forEach(t=>{
+    if(t.mid!==u.id||t.isSell)return;
+    if(!refundsByUser[t.who])refundsByUser[t.who]=0;
+    refundsByUser[t.who]+=(t.amount||0);
+  });
 
-  if(useFirebase){
-    const refundsByUser={};
-    S.trades.forEach(t=>{if(t.mid!==u.id)return;if(!refundsByUser[t.who])refundsByUser[t.who]=0;refundsByUser[t.who]+=(t.amount||0)});
-    Object.entries(refundsByUser).forEach(([who,amt])=>{
-      if(amt>0)db.ref('payouts/'+u.id+'_'+encodeKey(who)).set({mid:u.id,who,amount:Math.round(amt*100)/100,marketTitle:u.title,winner:'CANCELLED',ts:Date.now(),claimed:false});
-    });
-  }
+  // Directly update each user's balance
+  Object.entries(refundsByUser).forEach(([who,amt])=>{
+    if(amt<=0)return;
+    const rounded=Math.round(amt*100)/100;
+    const key=encodeKey(who);
+    if(useFirebase){
+      db.ref('users/'+key).once('value',snap=>{
+        const userData=snap.val()||{name:who,balance:START_BAL};
+        userData.balance=Math.round((userData.balance+rounded)*100)/100;
+        db.ref('users/'+key).set(userData);
+      });
+    }else{
+      const userData=S.users[key]||{name:who,balance:START_BAL};
+      userData.balance=Math.round((userData.balance+rounded)*100)/100;
+      S.users[key]=userData;
+      localStorage.setItem('cmdp_users',JSON.stringify(S.users));
+    }
+    if(who.toLowerCase()===S.name.toLowerCase()){
+      S.portfolio.balance=Math.round((S.portfolio.balance+rounded)*100)/100;
+      savePortfolio();
+    }
+  });
+
   logActivity({type:'cancel',user:S.name,marketId:u.id,desc:`${S.name} cancelled "${u.title}" — all refunded`});
   S.resolving=null;S.sel=u;flash("Market cancelled. Refunds distributed.");
 }
@@ -412,22 +458,40 @@ function deleteMarket(id){
   S.sel=null;S.resolving=null;S.editing=null;flash("Market deleted.");
 }
 
-// ── Check for unclaimed payouts on load ──
+// ── Sync balance from Firebase (source of truth) + claim any legacy IOUs ──
 function checkPayouts(){
-  if(!useFirebase)return;
+  if(!useFirebase||!S.name)return;
+  const key=encodeKey(S.name);
+
+  // First: claim any legacy unclaimed IOUs from old payout system
   db.ref('payouts').once('value',snap=>{
     const all=snap.val();if(!all)return;
-    let totalPayout=0;
-    Object.entries(all).forEach(([key,p])=>{
+    let legacyPayout=0;
+    Object.entries(all).forEach(([k,p])=>{
       if(p.who===S.name&&!p.claimed){
-        totalPayout+=p.amount;
-        db.ref('payouts/'+key+'/claimed').set(true);
+        legacyPayout+=p.amount;
+        db.ref('payouts/'+k+'/claimed').set(true);
       }
     });
-    if(totalPayout>0){
-      S.portfolio.balance=Math.round((S.portfolio.balance+totalPayout)*100)/100;
+    if(legacyPayout>0){
+      // Add legacy payouts to Firebase balance
+      db.ref('users/'+key).once('value',snap2=>{
+        const u=snap2.val()||{name:S.name,balance:START_BAL};
+        u.balance=Math.round((u.balance+legacyPayout)*100)/100;
+        db.ref('users/'+key).set(u);
+        S.portfolio.balance=u.balance;
+        savePortfolio();
+        flash(`Claimed $${Math.round(legacyPayout)} in unclaimed payouts!`);
+      });
+    }
+  });
+
+  // Second: sync local balance with Firebase (Firebase is source of truth)
+  db.ref('users/'+key).once('value',snap=>{
+    const u=snap.val();
+    if(u&&u.balance!=null){
+      S.portfolio.balance=u.balance;
       savePortfolio();
-      flash(`You received $${totalPayout.toFixed(0)} in payouts!`);
     }
   });
 }
@@ -636,11 +700,13 @@ function render(){
       <p style="font-size:13px;color:var(--tx2);margin-bottom:22px;line-height:1.5">Enter your name to join.</p>
       <input id="name-input" placeholder="Your name (e.g. Quincy M.)" value="${s.nameIn}" style="margin-bottom:12px;text-align:center;font-size:14.5px">
       <button class="btn btn-t" id="name-btn" style="width:100%;padding:11px;font-size:14px">Enter CMDpredict</button>
+      <button class="btn btn-ghost" id="guest-btn" style="width:100%;margin-top:8px;padding:9px;font-size:13px">👁️ View as Guest</button>
     </div></div>`;
     const ni=document.getElementById('name-input');
     ni.addEventListener('input',e=>{S.nameIn=e.target.value});
     ni.addEventListener('keydown',e=>{if(e.key==='Enter')confirmName()});
     document.getElementById('name-btn').addEventListener('click',confirmName);
+    document.getElementById('guest-btn').addEventListener('click',enterGuest);
     ni.focus();return;
   }
   if(!s.ready){app.innerHTML=`<div class="setup-screen"><div class="m" style="color:${T}">Loading...</div></div>`;return}
@@ -649,7 +715,7 @@ function render(){
     .sort((a,b)=>s.sort==='newest'?b.id-a.id:(b.volume||0)-(a.volume||0));
   const tv=s.markets.reduce((x,m)=>x+(m.volume||0),0),tt=s.trades.length,lb=getLeaderboard(),admin=isAdmin();
   const league=getLeagueTable(),loser=league.length>0?league[league.length-1]:null;
-  const tabs=['league','markets','portfolio','leaderboard','activity'];
+  const tabs=['league','markets',s.isGuest?null:'portfolio','leaderboard','activity'].filter(Boolean);
   if(admin)tabs.push('admin');
 
   app.innerHTML=`
@@ -667,11 +733,11 @@ function render(){
     </div>
     <div style="display:flex;align-items:center;gap:10px">
       ${useFirebase?'<span class="live-dot"></span>':''}
-      <span class="m" style="font-size:12.5px;color:${GN};font-weight:600">$${s.portfolio.balance.toLocaleString()}</span>
-      <button class="btn btn-t" id="new-market-btn" style="padding:5px 12px;font-size:12px">+ New Market</button>
-      <div style="display:flex;align-items:center;gap:5px;padding:3px 8px 3px 3px;border-radius:18px;background:var(--tl)">
-        <div style="width:24px;height:24px;border-radius:50%;background:${T};display:flex;align-items:center;justify-content:center;font-size:9.5px;font-weight:700;color:#fff">${s.name.slice(0,2).toUpperCase()}</div>
-        <span style="font-size:12px;font-weight:600;color:${TD}">${s.name}</span>
+      ${s.isGuest?'':`<span class="m" style="font-size:12.5px;color:${GN};font-weight:600">$${s.portfolio.balance.toLocaleString()}</span>`}
+      ${s.isGuest?'':`<button class="btn btn-t" id="new-market-btn" style="padding:5px 12px;font-size:12px">+ New Market</button>`}
+      <div style="display:flex;align-items:center;gap:5px;padding:3px 8px 3px 3px;border-radius:18px;background:${s.isGuest?'#F1F5F9':'var(--tl)'}">
+        <div style="width:24px;height:24px;border-radius:50%;background:${s.isGuest?'#94A3B8':T};display:flex;align-items:center;justify-content:center;font-size:9.5px;font-weight:700;color:#fff">${s.isGuest?'👁️':s.name.slice(0,2).toUpperCase()}</div>
+        <span style="font-size:12px;font-weight:600;color:${s.isGuest?'#94A3B8':TD}">${s.isGuest?'Guest':s.name}</span>
         ${admin?'<span style="font-size:8px;background:#FEF3C7;color:#92400E;padding:1px 5px;border-radius:3px;font-weight:700">ADMIN</span>':''}
       </div>
     </div>
@@ -1103,7 +1169,7 @@ function mountDetail(){
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:16px">
       ${[{l:'Volume',v:m.volume?'$'+(m.volume/1000).toFixed(1)+'K':'$0'},{l:'Liquidity',v:'$'+(m.liquidity/1000).toFixed(1)+'K'},{l:'Trades',v:m.traders||0},{l:'Ends',v:new Date(m.endDate).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}].map(x=>`<div style="text-align:center"><div style="font-size:9px;color:var(--tx3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:2px">${x.l}</div><div class="m" style="font-size:12px;font-weight:600;color:#334155">${x.v}</div></div>`).join('')}
     </div>
-    ${m.resolved?'':`<div style="background:#F8FAFC;border-radius:8px;padding:16px;border:1px solid var(--bdr)">
+    ${m.resolved||S.isGuest?'':`<div style="background:#F8FAFC;border-radius:8px;padding:16px;border:1px solid var(--bdr)">
       <div style="font-size:12px;font-weight:600;color:#334155;margin-bottom:10px">Trading: <span style="color:${T}">${m.outcomes[s.selOc]?.label||''}</span></div>
       <div style="display:flex;margin-bottom:10px;background:#EEF2F7;border-radius:5px;padding:2px">
         <button class="side-btn" data-side="yes" style="flex:1;padding:7px;border:none;border-radius:4px;cursor:pointer;font-family:'Source Sans 3',sans-serif;font-weight:600;font-size:12.5px;background:${s.side==='yes'?GN:'transparent'};color:${s.side==='yes'?'#fff':'var(--tx3)'}">Buy YES ${Math.round((m.outcomes[s.selOc]?.price||.5)*100)}¢</button>
