@@ -5,8 +5,8 @@
 const ADMINS=["quincy m.","quincy mcdougal","admin"];
 const ANALYSTS=["Constantine","Luca","James","Quincy","Phil"];
 const START_BAL=10000;
-const CATS=["All","Meetings","Shipping","Hiring","Culture","Metrics","Finance","Engineering","Product","Other"];
-const CI={Meetings:"📅",Shipping:"🚀",Hiring:"👥",Culture:"🎯",Metrics:"📊",Finance:"💰",Engineering:"⚙️",Product:"📦",Other:"🔮"};
+const CATS=["All","Macro","Deals","Articles","Employees","Other"];
+const CI={Macro:"🌍",Deals:"🤝",Articles:"📝",Employees:"👥",Other:"🔮"};
 const T="#1B8A9E",TD="#156F80",TL="#E8F6F8",GN="#10B981",RD="#EF4444",AMBER="#F59E0B";
 
 const FIREBASE_CONFIG={
@@ -155,56 +155,52 @@ function getUserStats(userName){
   return{trades:tradeDetails,totalVolume,totalPnl,wins,losses,totalTrades:userTrades.length};
 }
 
-// ── AMM (LMSR-inspired) ──
-// Liquidity parameter b controls price sensitivity. Lower b = more price impact per trade.
-// Price of outcome i = e^(q_i/b) / sum(e^(q_j/b))
-// Cost to buy shares = b * ln(sum(e^(q_j'/b))) - b * ln(sum(e^(q_j/b)))
+// ── AMM (Independent Binary Outcomes) ──
+// Each outcome is its own independent YES/NO market.
+// Prices do NOT need to sum to 100% across outcomes.
+// Each outcome has a pool value; price = sigmoid of pool bias.
+// This means "By 15/3 YES at 70¢" does NOT force "By 31/3" down.
 
-function ammPrices(outcomes, b){
-  const exps=outcomes.map(o=>Math.exp((o.pool||0)/b));
-  const sum=exps.reduce((a,x)=>a+x,0);
-  return exps.map(e=>Math.max(.01,Math.min(.99,Math.round((e/sum)*100)/100)));
+function outcomePrice(pool, b){
+  // Sigmoid: price = 1 / (1 + e^(-pool/b))
+  // When pool=0, price=50¢. Buying YES pushes pool up (price up). Buying NO pushes pool down.
+  const p = 1 / (1 + Math.exp(-(pool||0)/b));
+  return Math.max(.01, Math.min(.99, Math.round(p*100)/100));
 }
 
-function ammCost(outcomes, oi, shares, side, b){
-  // Calculate the cost to buy `shares` of YES or NO on outcome oi
-  // For YES: increase q_oi. For NO: increase all OTHER q_j (equivalent to shorting oi)
-  const before=outcomes.map(o=>Math.exp((o.pool||0)/b));
-  const sumBefore=before.reduce((a,x)=>a+x,0);
-
-  const after=outcomes.map((o,j)=>{
-    let q=o.pool||0;
-    if(side==='yes'&&j===oi) q+=shares;
-    if(side==='no'&&j!==oi) q+=shares;
-    return Math.exp(q/b);
-  });
-  const sumAfter=after.reduce((a,x)=>a+x,0);
-
-  return b*Math.log(sumAfter) - b*Math.log(sumBefore);
+function outcomeCost(pool, shares, side, b){
+  // Cost to move the pool by `shares` in the given direction
+  // side=yes: pool increases. side=no: pool decreases.
+  const dir = side==='yes' ? 1 : -1;
+  const newPool = (pool||0) + dir*shares;
+  // Cost = b * [ln(1+e^(newPool/b)) - ln(1+e^(pool/b))]
+  // For numerical stability use log-sum-exp
+  const logSumBefore = b * Math.log(1 + Math.exp((pool||0)/b));
+  const logSumAfter = b * Math.log(1 + Math.exp(newPool/b));
+  return Math.abs(logSumAfter - logSumBefore);
 }
 
 function cpmmBuy(market, oi, side, amount){
   const m=JSON.parse(JSON.stringify(market));
-  const b=m.liquidity?m.liquidity*1.5:1500; // liquidity parameter
+  const b=m.liquidity?m.liquidity*1.5:1500;
 
-  // Binary search for how many shares `amount` buys
-  let lo=0, hi=amount*20, shares=0;
-  for(let iter=0;iter<50;iter++){
+  // Binary search for how many shares `amount` buys on this outcome
+  let lo=0, hi=amount*20;
+  for(let iter=0;iter<60;iter++){
     const mid=(lo+hi)/2;
-    const cost=ammCost(m.outcomes, oi, mid, side, b);
+    const cost=outcomeCost(m.outcomes[oi].pool||0, mid, side, b);
     if(cost<amount) lo=mid; else hi=mid;
   }
-  shares=Math.round(lo*100)/100;
+  const shares=Math.round(lo*100)/100;
 
-  // Apply the pool changes
-  if(side==='yes') m.outcomes[oi].pool=(m.outcomes[oi].pool||0)+shares;
-  else m.outcomes.forEach((o,j)=>{if(j!==oi) o.pool=(o.pool||0)+shares;});
+  // Apply pool change (only to THIS outcome)
+  const dir = side==='yes' ? 1 : -1;
+  m.outcomes[oi].pool = (m.outcomes[oi].pool||0) + dir*shares;
 
-  // Recalculate prices from the new pools
-  const prices=ammPrices(m.outcomes, b);
-  m.outcomes.forEach((o,j)=>{
-    o.price=prices[j];
-    o.history=[...(o.history||[o.price]),o.price];
+  // Recalculate price for ALL outcomes (each independently)
+  m.outcomes.forEach(o=>{
+    o.price = outcomePrice(o.pool||0, b);
+    o.history = [...(o.history||[o.price]), o.price];
   });
 
   m.volume=(m.volume||0)+amount;
@@ -214,38 +210,27 @@ function cpmmBuy(market, oi, side, amount){
   return {market:m, shares, avgPrice};
 }
 
-// Sell: reverse operation — remove shares from pools, return cash
 function cpmmSell(market, oi, side, shares){
   const m=JSON.parse(JSON.stringify(market));
   const b=m.liquidity?m.liquidity*1.5:1500;
 
-  // Calculate the refund (negative cost = money back)
-  const cost=ammCost(m.outcomes, oi, shares, side, b);
-  const refund=Math.max(0, cost); // cost of adding those shares = what you get back for removing
+  // Selling = reversing the pool direction
+  const sellSide = side==='yes' ? 'no' : 'yes';
+  const saleValue=Math.round(outcomeCost(m.outcomes[oi].pool||0, shares, sellSide, b)*100)/100;
 
-  // Actually we need reverse: cost of REMOVING shares
-  // Removing shares = negative shares added
-  const before=m.outcomes.map(o=>Math.exp((o.pool||0)/b));
-  const sumBefore=before.reduce((a,x)=>a+x,0);
-
-  if(side==='yes') m.outcomes[oi].pool=Math.max(0,(m.outcomes[oi].pool||0)-shares);
-  else m.outcomes.forEach((o,j)=>{if(j!==oi) o.pool=Math.max(0,(o.pool||0)-shares);});
-
-  const after=m.outcomes.map(o=>Math.exp((o.pool||0)/b));
-  const sumAfter=after.reduce((a,x)=>a+x,0);
-
-  const saleValue=Math.max(0, b*Math.log(sumBefore) - b*Math.log(sumAfter));
+  // Apply reverse pool change
+  const dir = side==='yes' ? -1 : 1;
+  m.outcomes[oi].pool = (m.outcomes[oi].pool||0) + dir*shares;
 
   // Recalculate prices
-  const prices=ammPrices(m.outcomes, b);
-  m.outcomes.forEach((o,j)=>{
-    o.price=prices[j];
-    o.history=[...(o.history||[o.price]),o.price];
+  m.outcomes.forEach(o=>{
+    o.price = outcomePrice(o.pool||0, b);
+    o.history = [...(o.history||[o.price]), o.price];
   });
 
-  m.volume=(m.volume||0)+Math.round(saleValue*100)/100;
+  m.volume=(m.volume||0)+saleValue;
 
-  return {market:m, saleValue:Math.round(saleValue*100)/100};
+  return {market:m, saleValue};
 }
 
 // ── ACTIONS ──
@@ -725,7 +710,12 @@ function render(){
   if(!s.ready){app.innerHTML=`<div class="setup-screen"><div class="m" style="color:${T}">Loading...</div></div>`;return}
 
   const list=s.markets.filter(m=>s.cat==='All'||m.category===s.cat).filter(m=>m.title.toLowerCase().includes(s.q.toLowerCase()))
-    .sort((a,b)=>s.sort==='newest'?b.id-a.id:(b.volume||0)-(a.volume||0));
+    .sort((a,b)=>{
+      // Resolved/cancelled markets always go to the bottom
+      if(a.resolved&&!b.resolved)return 1;
+      if(!a.resolved&&b.resolved)return -1;
+      return s.sort==='newest'?b.id-a.id:(b.volume||0)-(a.volume||0);
+    });
   const tv=s.markets.reduce((x,m)=>x+(m.volume||0),0),tt=s.trades.length,lb=getLeaderboard(),admin=isAdmin();
   const league=getLeagueTable(),loser=league.length>0?league[league.length-1]:null;
   const tabs=['league','markets',s.isGuest?null:'portfolio','leaderboard','activity'].filter(Boolean);
