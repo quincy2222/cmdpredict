@@ -4,9 +4,44 @@
 
 const ADMINS=["quincy m.","quincy mcdougal","admin"];
 const ANALYSTS=["Constantine","Luca","James","Quincy","Phil"];
-// Alias map: any name variant → canonical analyst name (case-insensitive)
-const ALIASES={"philip":"Phil","phillip":"Phil","phil":"Phil"};
-function canonicalName(name){return ALIASES[(name||'').toLowerCase()]||name}
+// Comprehensive alias map: lowercase variant → canonical analyst name
+const ALIASES={
+  // Phil variants
+  "phil":"Phil","philip":"Phil","phillip":"Phil","phillipe":"Phil","felipe":"Phil","pip":"Phil",
+  // Constantine variants
+  "constantine":"Constantine","const":"Constantine","con":"Constantine","tino":"Constantine","costas":"Constantine","gus":"Constantine","dino":"Constantine",
+  // Luca variants
+  "luca":"Luca","luka":"Luca","luke":"Luca","lucca":"Luca",
+  // James variants
+  "james":"James","jamie":"James","jim":"James","jimmy":"James","jem":"James",
+  // Quincy variants
+  "quincy":"Quincy","quince":"Quincy","quin":"Quincy","quinn":"Quincy"
+};
+function matchAnalyst(input){
+  if(!input)return null;
+  const low=input.trim().toLowerCase();
+  // 1. Direct alias match
+  if(ALIASES[low])return ALIASES[low];
+  // 2. Check if input matches any analyst name (case-insensitive)
+  const exact=ANALYSTS.find(a=>a.toLowerCase()===low);
+  if(exact)return exact;
+  // 3. Check if any analyst name STARTS with input (e.g. "con" → Constantine)
+  const starts=ANALYSTS.find(a=>a.toLowerCase().startsWith(low)&&low.length>=3);
+  if(starts)return starts;
+  // 4. Check if input starts with any analyst name
+  const revStarts=ANALYSTS.find(a=>low.startsWith(a.toLowerCase()));
+  if(revStarts)return revStarts;
+  // 5. Check if any alias starts with input or input starts with alias
+  for(const[alias,name]of Object.entries(ALIASES)){
+    if(alias.startsWith(low)&&low.length>=3)return name;
+    if(low.startsWith(alias))return name;
+  }
+  // 6. Fuzzy: check if input contains an analyst name or vice versa
+  const contains=ANALYSTS.find(a=>low.includes(a.toLowerCase())||a.toLowerCase().includes(low));
+  if(contains&&low.length>=3)return contains;
+  return null;
+}
+function canonicalName(name){return matchAnalyst(name)||name}
 const START_BAL=10000;
 const CATS=["All","Macro","Deals","Articles","Employees","Other"];
 const CI={Macro:"🌍",Deals:"🤝",Articles:"📝",Employees:"👥",Other:"🔮"};
@@ -30,7 +65,7 @@ try{if(FIREBASE_CONFIG.apiKey){firebase.initializeApp(FIREBASE_CONFIG);db=fireba
 let S={
   markets:[],trades:[],users:{},seasons:[],currentSeason:null,
   portfolio:{balance:START_BAL,positions:[]},
-  name:localStorage.getItem('cmdp_name')||'',nameIn:'',
+  name:(function(){const n=localStorage.getItem('cmdp_name');return n&&matchAnalyst(n)?matchAnalyst(n):''}()),nameIn:'',
   view:'markets',cat:'All',sort:'newest',q:'',
   sel:null,selOc:0,side:'yes',amt:'',
   creating:false,editing:null,resolving:null,adminPanel:false,
@@ -234,7 +269,13 @@ function cpmmSell(market, oi, side, shares){
 
 // ── ACTIONS ──
 function confirmName(){
-  if(!S.nameIn.trim())return;S.name=S.nameIn.trim();localStorage.setItem('cmdp_name',S.name);
+  if(!S.nameIn.trim())return;
+  const matched=matchAnalyst(S.nameIn.trim());
+  if(!matched){
+    flash("Access restricted to team analysts only.","err");
+    return;
+  }
+  S.name=matched;localStorage.setItem('cmdp_name',S.name);
   // Sync balance from Firebase if available
   const key=encodeKey(S.name);
   if(useFirebase){
@@ -244,7 +285,7 @@ function confirmName(){
         S.portfolio.balance=u.balance;
       }
       savePortfolio();
-      if(!S.isGuest) logActivity({type:'join',user:S.name,desc:`${S.name} joined CMDpredict`});
+      logActivity({type:'join',user:S.name,desc:`${S.name} joined CMDpredict`});
       checkPayouts();
       render();
     });
@@ -256,6 +297,8 @@ function confirmName(){
 }
 
 function enterGuest(){
+  const pw=prompt('Enter guest password:');
+  if(pw!=='cmd2026'){flash("Incorrect password.","err");return}
   S.name='Guest';S.isGuest=true;S.view='markets';render();
 }
 
@@ -810,8 +853,8 @@ function render(){
       ${useFirebase?`<div style="font-size:12px;color:var(--gn);margin-bottom:16px"><span class="live-dot"></span>Connected — real-time sync active</div>`:`<div style="background:#FEF3C7;border:1px solid #FDE68A;border-radius:8px;padding:12px;margin-bottom:20px;font-size:12px;color:#92400E;line-height:1.5;text-align:left">⚠️ <strong>Local mode.</strong></div>`}
       <div style="width:56px;height:56px;border-radius:50%;background:var(--tl);display:flex;align-items:center;justify-content:center;margin:0 auto 18px;font-size:24px">👤</div>
       <h2 style="font-size:17px;font-weight:700;margin-bottom:5px">Welcome</h2>
-      <p style="font-size:13px;color:var(--tx2);margin-bottom:22px;line-height:1.5">Enter your name to join.</p>
-      <input id="name-input" placeholder="Your name (e.g. Quincy M.)" value="${s.nameIn}" style="margin-bottom:12px;text-align:center;font-size:14.5px">
+      <p style="font-size:13px;color:var(--tx2);margin-bottom:22px;line-height:1.5">Enter your name to continue.</p>
+      <input id="name-input" placeholder="Your first name" value="${s.nameIn}" style="margin-bottom:12px;text-align:center;font-size:14.5px">
       <button class="btn btn-t" id="name-btn" style="width:100%;padding:11px;font-size:14px">Enter CMDpredict</button>
       <button class="btn btn-ghost" id="guest-btn" style="width:100%;margin-top:8px;padding:9px;font-size:13px">👁️ View as Guest</button>
     </div></div>`;
