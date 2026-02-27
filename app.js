@@ -161,7 +161,8 @@ function initActivityLog(){
 
 // ── Get user stats from trades ──
 function getUserStats(userName){
-  const userTrades=S.trades.filter(t=>t.who===userName);
+  const canonical=canonicalName(userName);
+  const userTrades=S.trades.filter(t=>canonicalName(t.who)===canonical);
   let totalVolume=0,totalPnl=0,wins=0,losses=0;
   const tradeDetails=[];
 
@@ -813,18 +814,19 @@ function mountInteractiveChart(canvasId, data, color, marketTrades, outcomeLabel
 function getLeaderboard(){
   const map={};
   S.trades.forEach(t=>{
-    if(!map[t.who])map[t.who]={name:t.who,trades:0,volume:0,pnl:0};
-    map[t.who].trades++;map[t.who].volume+=(t.amount||0);
+    const who=canonicalName(t.who);
+    if(!map[who])map[who]={name:who,trades:0,volume:0,pnl:0};
+    map[who].trades++;map[who].volume+=Math.abs(t.amount||0);
     const mk=S.markets.find(m=>m.id===t.mid);
     if(mk&&mk.outcomes[t.outcomeIdx]){
       if(mk.resolved){
         const won=(t.side==='yes'&&t.outcomeIdx===mk.winnerIdx)||(t.side==='no'&&t.outcomeIdx!==mk.winnerIdx);
         if(mk.cancelled){/* no pnl */}
-        else if(won)map[t.who].pnl+=(t.shares-t.amount);
-        else map[t.who].pnl+=(-t.amount);
+        else if(won)map[who].pnl+=(t.shares-t.amount);
+        else map[who].pnl+=(-t.amount);
       }else{
         const cur=t.side==='yes'?mk.outcomes[t.outcomeIdx].price:(1-mk.outcomes[t.outcomeIdx].price);
-        map[t.who].pnl+=(cur-t.avg)*t.shares;
+        map[who].pnl+=(cur-t.avg)*t.shares;
       }
     }
   });
