@@ -1183,10 +1183,16 @@ function mountDetail(){
     <div style="font-size:11px;font-weight:600;color:var(--tx3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Contracts</div>
     <div style="display:flex;flex-direction:column;gap:5px;margin-bottom:16px">
       ${m.outcomes.map((o,j)=>{const pct=Math.round(o.price*100),active=s.selOc===j,w=m.resolved&&m.winnerIdx===j;
-        return`<div class="outcome-row" data-idx="${j}" style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;cursor:pointer;border:2px solid ${active&&!m.resolved?T:'transparent'};background:${w?'#F0FDF4':active?'var(--tll)':'#F8FAFC'}">
-          <div style="flex:1;min-width:0"><div style="font-size:13.5px;font-weight:600;margin-bottom:4px;color:${w?GN:'var(--tx)'}">${w?'✓ ':''}${o.label}</div><div style="height:5px;border-radius:3px;background:#E2E8F0;overflow:hidden"><div style="height:100%;border-radius:3px;background:${w?GN:T};width:${pct}%"></div></div></div>
+        const hasChart=o.history&&o.history.length>1;
+        const isBinary=m.outcomes.length===2;
+        return`<div>
+          <div class="outcome-row" data-idx="${j}" style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;cursor:pointer;border:2px solid ${active&&!m.resolved?T:'transparent'};background:${w?'#F0FDF4':active?'var(--tll)':'#F8FAFC'}">
+          <div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:6px;font-size:13.5px;font-weight:600;color:${w?GN:'var(--tx)'}">${w?'✓ ':''}${o.label}${hasChart&&!isBinary?`<button class="spark-toggle" data-oc="${j}" style="background:none;border:1px solid var(--bdr);border-radius:4px;padding:1px 6px;font-size:10px;color:var(--tx3);cursor:pointer;font-family:inherit;transition:all .1s" title="Toggle chart">📈</button>`:''}</div><div style="height:4px;border-radius:2px;background:#E2E8F0;overflow:hidden;margin-top:6px"><div style="height:100%;border-radius:2px;background:${w?GN:T};width:${pct}%"></div></div></div>
           <div style="text-align:right;flex-shrink:0"><div class="m" style="font-size:18px;font-weight:700;color:${w?GN:T}">${pct}¢</div></div>
-          ${spark(o.history,56,18,w?GN:T)}</div>`}).join('')}
+        </div>
+        ${isBinary&&hasChart?`<div style="padding:2px 12px 6px">${spark(o.history,280,28,w?GN:T)}</div>`:''}
+        <div class="spark-panel" data-oc="${j}" style="display:none;padding:2px 12px 8px">${hasChart?spark(o.history,280,28,w?GN:T):''}</div>
+        </div>`}).join('')}
     </div>
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:16px">
       ${[{l:'Volume',v:m.volume?'$'+(m.volume/1000).toFixed(1)+'K':'$0'},{l:'Liquidity',v:'$'+(m.liquidity/1000).toFixed(1)+'K'},{l:'Trades',v:m.traders||0},{l:'Ends',v:new Date(m.endDate).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}].map(x=>`<div style="text-align:center"><div style="font-size:9px;color:var(--tx3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:2px">${x.l}</div><div class="m" style="font-size:12px;font-weight:600;color:#334155">${x.v}</div></div>`).join('')}
@@ -1244,6 +1250,13 @@ function mountDetail(){
   document.getElementById('close-detail').onclick=()=>{S.sel=null;render()};
   document.getElementById('detail-overlay').onclick=e=>{if(e.target===e.currentTarget){S.sel=null;render()}};
   document.querySelectorAll('.outcome-row').forEach(el=>{el.onclick=()=>{if(!S.sel.resolved){S.selOc=parseInt(el.dataset.idx);S.side='yes';render()}}});
+  document.querySelectorAll('.spark-toggle').forEach(el=>{
+    el.onclick=e=>{
+      e.stopPropagation();
+      const panel=document.querySelector(`.spark-panel[data-oc="${el.dataset.oc}"]`);
+      if(panel){panel.style.display=panel.style.display==='none'?'block':'none';el.style.background=panel.style.display==='none'?'none':'var(--tl)'}
+    };
+  });
   document.querySelectorAll('.side-btn').forEach(el=>{el.onclick=e=>{e.stopPropagation();S.side=el.dataset.side;render()}});
   if(tradeBtn)tradeBtn.onclick=trade;
   if(document.getElementById('edit-market-btn'))document.getElementById('edit-market-btn').onclick=()=>{
