@@ -3,9 +3,11 @@
 // ═══════════════════════════════════════════════════
 
 const ADMINS=["quincy m.","quincy mcdougal","admin"];
+const ANALYSTS=["Constantine","Luca","James","Quincy","Phil"];
+const START_BAL=10000;
 const CATS=["All","Meetings","Shipping","Hiring","Culture","Metrics","Finance","Engineering","Product","Other"];
 const CI={Meetings:"📅",Shipping:"🚀",Hiring:"👥",Culture:"🎯",Metrics:"📊",Finance:"💰",Engineering:"⚙️",Product:"📦",Other:"🔮"};
-const T="#1B8A9E",TD="#156F80",TL="#E8F6F8",GN="#10B981",RD="#EF4444";
+const T="#1B8A9E",TD="#156F80",TL="#E8F6F8",GN="#10B981",RD="#EF4444",AMBER="#F59E0B";
 
 const FIREBASE_CONFIG={
   apiKey:"AIzaSyDra0iY_fPwjdgAPWf-JQr8H6ETmUQUaMg",
@@ -23,19 +25,21 @@ try{if(FIREBASE_CONFIG.apiKey){firebase.initializeApp(FIREBASE_CONFIG);db=fireba
 
 // ── STATE ──
 let S={
-  markets:[],trades:[],users:{},
-  portfolio:{balance:10000,positions:[]},
+  markets:[],trades:[],users:{},seasons:[],currentSeason:null,
+  portfolio:{balance:START_BAL,positions:[]},
   name:localStorage.getItem('cmdp_name')||'',nameIn:'',
-  view:'markets',cat:'All',sort:'newest',q:'',
+  view:'league',cat:'All',sort:'newest',q:'',
   sel:null,selOc:0,side:'yes',amt:'',
   creating:false,editing:null,resolving:null,adminPanel:false,
   addFundsUser:null,addFundsAmt:'',
   // User profile modal (visible to everyone)
   viewingUser:null,
   // Admin: add new user modal
-  addingUser:false,newUserName:'',newUserBalance:'10000',
+  addingUser:false,newUserName:'',newUserBalance:String(START_BAL),
   // Admin: editing balance inline
   editingBalance:null,editBalanceVal:'',
+  // Season admin
+  endingSeasonModal:false,
   notif:null,
   form:{title:'',desc:'',cat:'Other',end:'',outcomes:['Yes','No']},
   editForm:{outcomes:[]},
@@ -58,10 +62,19 @@ async function init(){
     db.ref('users').on('value',snap=>{
       const v=snap.val();S.users=v||{};render();
     });
+    db.ref('seasons').on('value',snap=>{
+      const v=snap.val();S.seasons=v?Object.values(v):[];
+      S.seasons.sort((a,b)=>b.startedAt-a.startedAt);
+      S.currentSeason=S.seasons.find(s=>!s.ended)||null;
+      render();
+    });
   }else{
     S.markets=JSON.parse(localStorage.getItem('cmdp_markets')||'[]');
     S.trades=JSON.parse(localStorage.getItem('cmdp_trades')||'[]');
     S.users=JSON.parse(localStorage.getItem('cmdp_users')||'{}');
+    S.seasons=JSON.parse(localStorage.getItem('cmdp_seasons')||'[]');
+    S.seasons.sort((a,b)=>b.startedAt-a.startedAt);
+    S.currentSeason=S.seasons.find(s=>!s.ended)||null;
   }
   const rp=localStorage.getItem('cmdp_portfolio');if(rp)S.portfolio=JSON.parse(rp);
   S.ready=true;render();
@@ -399,8 +412,63 @@ function adminAddUser(){
   }
   logActivity({type:'admin_add_user',user:S.name,target:name,balance:bal,desc:`${S.name} added user "${name}" with $${bal}`});
   flash(`Added user "${name}" with $${bal}`);
-  S.addingUser=false;S.newUserName='';S.newUserBalance='10000';render();
+  S.addingUser=false;S.newUserName='';S.newUserBalance=String(START_BAL);render();
 }
+
+// ── SEASONS ──
+function saveSeasons(){
+  if(useFirebase){const o={};S.seasons.forEach(s=>{o[s.id]=s});db.ref('seasons').set(o)}
+  else localStorage.setItem('cmdp_seasons',JSON.stringify(S.seasons));
+}
+
+function startNewSeason(label){
+  const season={id:Date.now(),number:S.seasons.length+1,label:label||'Season '+(S.seasons.length+1),startedAt:Date.now(),ended:false,endedAt:null,loser:null,standings:null};
+  S.seasons.unshift(season);S.currentSeason=season;saveSeasons();
+  // Reset all analyst balances
+  ANALYSTS.forEach(name=>{
+    const key=encodeKey(name);
+    const u=S.users[key]||{name,balance:START_BAL,lastSeen:Date.now()};
+    u.balance=START_BAL;
+    if(useFirebase)db.ref('users/'+key).set(u);
+    else S.users[key]=u;
+    if(name.toLowerCase()===S.name.toLowerCase()){S.portfolio.balance=START_BAL;S.portfolio.positions=[];savePortfolio()}
+  });
+  if(!useFirebase)localStorage.setItem('cmdp_users',JSON.stringify(S.users));
+  logActivity({type:'season_start',user:S.name,desc:`🏁 ${season.label} started! All balances reset to $${START_BAL.toLocaleString()}`});
+  flash(`${season.label} started! Balances reset.`);render();
+}
+
+function endCurrentSeason(){
+  if(!S.currentSeason)return;
+  const standings=getLeagueTable();
+  const loser=standings.length>0?standings[standings.length-1]:null;
+  S.currentSeason.ended=true;S.currentSeason.endedAt=Date.now();
+  S.currentSeason.loser=loser?loser.name:null;
+  S.currentSeason.loserBalance=loser?loser.portfolioValue:null;
+  S.currentSeason.standings=standings.map(s=>({name:s.name,portfolioValue:s.portfolioValue,pnl:s.pnl,trades:s.trades}));
+  S.seasons=S.seasons.map(s=>s.id===S.currentSeason.id?S.currentSeason:s);saveSeasons();
+  logActivity({type:'season_end',user:S.name,desc:`🍺 ${S.currentSeason.label} ended! ${loser?loser.name+' is buying the first round! 🍺':'No loser determined.'}`});
+  S.currentSeason=null;S.endingSeasonModal=false;
+  flash(loser?`${loser.name} is buying beers! 🍺`:'Season ended!');render();
+}
+
+function getLeagueTable(){
+  const table=[];
+  ANALYSTS.forEach(name=>{
+    const key=encodeKey(name);const ui=S.users[key]||S.users[name];
+    const bal=ui?ui.balance:START_BAL;
+    const ut=S.trades.filter(t=>t.who.toLowerCase()===name.toLowerCase());
+    let vol=0,w=0,l=0;
+    ut.forEach(t=>{vol+=(t.amount||0);const mk=S.markets.find(m=>m.id===t.mid);
+      if(mk&&mk.outcomes[t.outcomeIdx]&&mk.resolved&&!mk.cancelled){
+        const won=(t.side==='yes'&&t.outcomeIdx===mk.winnerIdx)||(t.side==='no'&&t.outcomeIdx!==mk.winnerIdx);
+        if(won)w++;else l++;}});
+    table.push({name,portfolioValue:Math.round(bal*100)/100,pnl:Math.round((bal-START_BAL)*100)/100,volume:vol,wins:w,losses:l,trades:ut.length});
+  });
+  table.sort((a,b)=>b.portfolioValue-a.portfolioValue);return table;
+}
+
+function fmtDate(ts){return new Date(ts).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}
 
 // ── SPARKLINE ──
 function spark(data,w,h,color){
@@ -469,7 +537,8 @@ function render(){
   const list=s.markets.filter(m=>s.cat==='All'||m.category===s.cat).filter(m=>m.title.toLowerCase().includes(s.q.toLowerCase()))
     .sort((a,b)=>s.sort==='newest'?b.id-a.id:(b.volume||0)-(a.volume||0));
   const tv=s.markets.reduce((x,m)=>x+(m.volume||0),0),tt=s.trades.length,lb=getLeaderboard(),admin=isAdmin();
-  const tabs=['markets','portfolio','leaderboard','activity'];
+  const league=getLeagueTable(),loser=league.length>0?league[league.length-1]:null;
+  const tabs=['league','markets','portfolio','leaderboard','activity'];
   if(admin)tabs.push('admin');
 
   app.innerHTML=`
@@ -482,7 +551,7 @@ function render(){
       </div>
       <div style="width:1px;height:20px;background:var(--bdr)"></div>
       <div style="display:flex;gap:1px">
-        ${tabs.map(v=>`<button class="tab ${s.view===v?'active':''}" data-view="${v}">${v==='admin'?'⚙️ Admin':v==='activity'?'📋 Activity':v[0].toUpperCase()+v.slice(1)}</button>`).join('')}
+        ${tabs.map(v=>`<button class="tab ${s.view===v?'active':''}" data-view="${v}">${v==='admin'?'⚙️ Admin':v==='activity'?'📋 Activity':v==='league'?'🏆 League':v[0].toUpperCase()+v.slice(1)}</button>`).join('')}
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:10px">
@@ -498,6 +567,7 @@ function render(){
   </div></header>
   <main>
 
+  ${s.view==='league'?renderLeague(league,loser):''}
   ${s.view==='markets'?renderMarkets(list,tv,tt,lb):''}
   ${s.view==='portfolio'?renderPortfolio():''}
   ${s.view==='leaderboard'?renderLeaderboard(lb):''}
@@ -507,7 +577,7 @@ function render(){
   </main>
   <footer>
     <div style="width:16px;height:16px;border-radius:3px;background:${T};display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:6.5px;color:#fff">CM</div>
-    <span>CMD<span style="color:${T}">predict</span></span><span>·</span><span>Serving Transparency in Capital Markets</span>
+    <span>CMD<span style="color:${T}">predict</span></span><span>·</span><span>Lowest balance buys the first round 🍺</span>
     ${useFirebase?'<span>·</span><span><span class="live-dot"></span>Real-time sync</span>':''}
   </footer>`;
 
@@ -517,10 +587,113 @@ function render(){
   if(s.resolving)mountResolve();
   if(s.viewingUser)mountUserProfile();
   if(s.addingUser&&admin)mountAddUser();
+  if(s.endingSeasonModal&&admin)mountEndSeason();
   bindEvents();
 }
 
 // ── VIEW RENDERERS ──
+
+function renderLeague(league,loser){
+  const s=S,admin=isAdmin(),past=S.seasons.filter(x=>x.ended).slice(0,10);
+  const medals=['🥇','🥈','🥉'];
+  return`
+    <div class="season-banner">
+      <div style="position:relative;z-index:1">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px">
+          <div>
+            <div style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:rgba(255,255,255,.5);font-weight:600;margin-bottom:4px">${s.currentSeason?'CURRENT SEASON':'NO ACTIVE SEASON'}</div>
+            <div style="font-size:22px;font-weight:700">${s.currentSeason?s.currentSeason.label:'Start a new season to begin'}</div>
+            ${s.currentSeason?`<div style="font-size:12px;color:rgba(255,255,255,.6);margin-top:4px">Started ${fmtDate(s.currentSeason.startedAt)} · Everyone started with $${START_BAL.toLocaleString()}</div>`:''}
+          </div>
+          ${admin?`<div style="display:flex;gap:8px">
+            ${s.currentSeason?`<button class="btn btn-beer" id="end-season-btn">🍺 End Season — Call Drinks</button>`:''}
+            <button class="btn" id="start-season-btn" style="background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.2);font-size:12px;padding:7px 14px">${s.currentSeason?'🔄 Reset & New':'🏁 Start Season'}</button>
+          </div>`:''}
+        </div>
+        ${loser&&s.currentSeason?`<div style="margin-top:14px;padding:10px 14px;background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.25);border-radius:8px;display:flex;align-items:center;gap:10px">
+          <span class="beer-icon">🍺</span>
+          <div><span style="font-weight:700;color:#FCA5A5">${loser.name}</span> <span style="color:rgba(255,255,255,.7)">is currently on the hook for beers</span> <span class="m" style="color:#FCA5A5;font-weight:600">($${loser.portfolioValue.toLocaleString()})</span></div>
+        </div>`:''}
+      </div>
+    </div>
+
+    <div class="league-card" style="margin-bottom:24px">
+      <div style="padding:14px 18px;border-bottom:1px solid var(--bdr);display:flex;justify-content:space-between;align-items:center">
+        <div style="font-weight:700;font-size:15px">League Table</div>
+        <div style="font-size:11px;color:var(--tx3)">Ranked by portfolio value · Click to view profile</div>
+      </div>
+      ${league.map((p,i)=>{
+        const isL=i===league.length-1&&league.length>1,isMe=p.name.toLowerCase()===s.name.toLowerCase();
+        return`<div class="league-row ${isL?'is-loser':''} view-user-btn" data-user="${p.name}">
+          <div class="league-rank" style="color:${i===0?'#F59E0B':i===1?'#94A3B8':i===2?'#CD7F32':'#CBD5E1'}">${medals[i]||(i+1)}</div>
+          <div style="display:flex;align-items:center;gap:10px">
+            <div style="width:34px;height:34px;border-radius:50%;background:${isL?RD:T};display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff">${p.name.slice(0,2).toUpperCase()}</div>
+            <div>
+              <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                <span style="font-weight:700;font-size:14.5px">${p.name}</span>
+                ${isMe?`<span class="pill" style="background:${TL};color:${T}">YOU</span>`:''}
+                ${isL?'<span class="beer-badge">🍺 BUYING BEERS</span>':''}
+                ${i===0?'<span class="pill" style="background:#FEF3C7;color:#92400E">LEADER</span>':''}
+              </div>
+              <div style="font-size:11.5px;color:var(--tx3);margin-top:1px">${p.trades} trades · ${p.wins}W ${p.losses}L · $${p.volume.toFixed(0)} volume</div>
+            </div>
+          </div>
+          <div style="text-align:right">
+            <div class="m" style="font-size:17px;font-weight:700;color:${p.pnl>=0?GN:RD}">${p.pnl>=0?'+':''}$${Math.abs(p.pnl).toFixed(0)}</div>
+            <div style="font-size:10px;color:var(--tx3)">P&L</div>
+          </div>
+          <div style="text-align:right">
+            <div class="m" style="font-size:17px;font-weight:700;color:${p.portfolioValue>=START_BAL?GN:RD}">$${p.portfolioValue.toLocaleString()}</div>
+            <div style="font-size:10px;color:var(--tx3)">Balance</div>
+          </div>
+        </div>`}).join('')}
+    </div>
+
+    ${past.length>0?`
+      <div style="margin-bottom:24px">
+        <h3 style="font-size:16px;font-weight:700;margin-bottom:14px;display:flex;align-items:center;gap:8px">🍺 Hall of Shame <span style="font-size:11px;color:var(--tx3);font-weight:400">— Past season losers</span></h3>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px">
+          ${past.map(ps=>`
+            <div class="shame-card">
+              <div style="font-size:28px;margin-bottom:6px">🍺</div>
+              <div style="font-weight:700;font-size:14px;color:${RD};margin-bottom:2px">${ps.loser||'Unknown'}</div>
+              <div style="font-size:11px;color:var(--tx3);margin-bottom:6px">${ps.label}</div>
+              <div style="font-size:10px;color:var(--tx3)">${fmtDate(ps.startedAt)} — ${fmtDate(ps.endedAt)}</div>
+              ${ps.loserBalance!=null?`<div class="m" style="font-size:12px;color:${RD};font-weight:600;margin-top:4px">$${ps.loserBalance.toLocaleString()}</div>`:''}
+              ${ps.standings?`<div style="margin-top:8px;font-size:10.5px;color:var(--tx2);text-align:left;border-top:1px solid rgba(0,0,0,.06);padding-top:6px">
+                ${ps.standings.map((st,si)=>`<div style="display:flex;justify-content:space-between;padding:1px 0;${si===ps.standings.length-1?'color:'+RD+';font-weight:600':''}"><span>${si+1}. ${st.name}</span><span class="m">$${(st.portfolioValue||0).toLocaleString()}</span></div>`).join('')}
+              </div>`:''}
+            </div>`).join('')}
+        </div>
+      </div>`:''}`;
+}
+
+function mountEndSeason(){
+  const league=getLeagueTable(),loser=league.length>0?league[league.length-1]:null;
+  let html=`<div class="overlay" id="endseason-overlay"><div class="modal" style="text-align:center;max-width:460px">
+    <div style="font-size:64px;margin-bottom:12px">🍺</div>
+    <h2 style="font-size:20px;font-weight:700;margin-bottom:6px">End ${S.currentSeason?.label||'Season'}?</h2>
+    <p style="font-size:13px;color:var(--tx2);margin-bottom:20px;line-height:1.5">This will lock in the final standings and declare the loser who buys the first round.</p>
+    ${loser?`<div style="background:linear-gradient(135deg,#FEF2F2,#FFF7ED);border:1px solid #FECACA;border-radius:10px;padding:16px;margin-bottom:20px">
+      <div style="font-size:12px;color:var(--tx3);margin-bottom:4px">BUYING THE FIRST ROUND</div>
+      <div style="font-size:24px;font-weight:700;color:${RD}">${loser.name}</div>
+      <div class="m" style="font-size:14px;color:${RD};margin-top:2px">$${loser.portfolioValue.toLocaleString()} final balance</div>
+    </div>`:''}
+    <div style="display:flex;flex-direction:column;gap:6px;text-align:left;margin-bottom:20px;background:#F8FAFC;border-radius:8px;padding:12px">
+      <div style="font-size:10px;font-weight:600;color:var(--tx3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Final Standings</div>
+      ${league.map((p,i)=>`<div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;padding:2px 0;${i===league.length-1?'color:'+RD+';font-weight:700':''}"><span>${i+1}. ${p.name} ${i===league.length-1?'🍺':''}</span><span class="m" style="font-weight:600">$${p.portfolioValue.toLocaleString()}</span></div>`).join('')}
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-ghost" id="cancel-end-season" style="flex:1">Cancel</button>
+      <button class="btn btn-beer" id="confirm-end-season" style="flex:1">🍺 End Season & Declare Loser</button>
+    </div>
+  </div></div>`;
+  document.getElementById('app').insertAdjacentHTML('beforeend',html);
+  document.getElementById('cancel-end-season').onclick=()=>{S.endingSeasonModal=false;render()};
+  document.getElementById('endseason-overlay').onclick=e=>{if(e.target===e.currentTarget){S.endingSeasonModal=false;render()}};
+  document.getElementById('confirm-end-season').onclick=endCurrentSeason;
+}
+
 function renderMarkets(list,tv,tt,lb){
   const s=S;
   return`
@@ -955,7 +1128,7 @@ function mountResolve(){
 
 function bindEvents(){
   document.querySelectorAll('.tab').forEach(el=>{el.onclick=()=>{S.view=el.dataset.view;render()}});
-  document.getElementById('logo-click')?.addEventListener('click',()=>{S.view='markets';render()});
+  document.getElementById('logo-click')?.addEventListener('click',()=>{S.view='league';render()});
   document.getElementById('new-market-btn')?.addEventListener('click',()=>{S.creating=true;render()});
   document.getElementById('first-market-btn')?.addEventListener('click',()=>{S.creating=true;render()});
   document.getElementById('search-input')?.addEventListener('input',e=>{S.q=e.target.value;render()});
@@ -1008,6 +1181,12 @@ function bindEvents(){
     document.getElementById('add-funds-btn').onclick=adminAddFunds;
   if(document.getElementById('cancel-funds-btn'))
     document.getElementById('cancel-funds-btn').onclick=()=>{S.addFundsUser=null;render()};
+
+  // Season events
+  if(document.getElementById('end-season-btn'))
+    document.getElementById('end-season-btn').onclick=()=>{S.endingSeasonModal=true;render()};
+  if(document.getElementById('start-season-btn'))
+    document.getElementById('start-season-btn').onclick=()=>{const label=prompt('Season name?','Season '+(S.seasons.length+1));if(label!==null)startNewSeason(label)};
 }
 
 // Start
