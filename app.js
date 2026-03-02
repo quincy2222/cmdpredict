@@ -2,7 +2,7 @@
 // CMDpredict v4 — Activity ledger, user profiles, admin CRUD
 // ═══════════════════════════════════════════════════
 
-const ADMINS=["quincy m.","quincy mcdougal","admin"];
+const ADMINS=["quincy","quincy m.","quincy mcdougal","admin"];
 const ANALYSTS=["Constantine","Luca","James","Quincy","Phil"];
 // Comprehensive alias map: lowercase variant → canonical analyst name
 const ALIASES={
