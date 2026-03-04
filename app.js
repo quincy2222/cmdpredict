@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════
-// CMDpredict v5 — PARIMUTUEL EDITION
-// Zero-sum betting: all money in = all money out
+// CMDpredict v5 — Zero-sum AMM with pool-based settlement
+// AMM for price discovery, parimutuel for payouts
 // ═══════════════════════════════════════════════════
 
 const ADMINS=["quincy","quincy m.","quincy mcdougal","admin"];
@@ -68,7 +68,7 @@ let S={
   portfolio:{balance:START_BAL,positions:[]},
   name:(function(){const n=localStorage.getItem('cmdp_name');return n&&matchAnalyst(n)?matchAnalyst(n):''}()),nameIn:'',
   view:'markets',cat:'All',sort:'newest',q:'',
-  sel:null,selOc:0,amt:'',
+  sel:null,selOc:0,side:'yes',amt:'',
   creating:false,editing:null,resolving:null,adminPanel:false,
   addFundsUser:null,addFundsAmt:'',
   // User profile modal (visible to everyone)
@@ -171,79 +171,129 @@ function getUserStats(userName){
     totalVolume+=(t.amount||0);
     const mk=S.markets.find(m=>m.id===t.mid);
     let cur=t.avg,pnl=0,status='open';
-    if(mk){
+    if(mk&&mk.outcomes[t.outcomeIdx]){
       if(mk.resolved){
+        const won=(t.side==='yes'&&t.outcomeIdx===mk.winnerIdx)||(t.side==='no'&&t.outcomeIdx!==mk.winnerIdx);
         if(mk.cancelled){
           pnl=0;status='cancelled';
-        }else if(t.outcomeIdx===mk.winnerIdx){
-          const payout=calcPayout(mk,t);
-          pnl=payout-(t.amount||0);wins++;status='won';
+        }else if(won){
+          pnl=t.shares-t.amount;wins++;status='won';
         }else{
-          pnl=-(t.amount||0);losses++;status='lost';
+          pnl=-t.amount;losses++;status='lost';
         }
       }else{
-        // Implied value of open position
-        const pool=getMarketPool(mk);
-        const outcomePool=pool.byOutcome[t.outcomeIdx]||0;
-        const impliedValue=outcomePool>0?(t.amount/outcomePool)*pool.total:t.amount;
-        pnl=impliedValue-(t.amount||0);
+        cur=t.side==='yes'?mk.outcomes[t.outcomeIdx].price:(1-mk.outcomes[t.outcomeIdx].price);
+        pnl=(cur-t.avg)*t.shares;
         status='open';
       }
     }
     totalPnl+=pnl;
-    tradeDetails.push({...t,pnl,status,marketTitle:t.title||mk?.title||'Unknown'});
+    tradeDetails.push({...t,currentPrice:cur,pnl,status,marketTitle:t.title||mk?.title||'Unknown'});
   });
 
   tradeDetails.sort((a,b)=>b.ts-a.ts);
   return{trades:tradeDetails,totalVolume,totalPnl,wins,losses,totalTrades:userTrades.length};
 }
 
+// ── AMM (Independent Binary Outcomes) ──
+// Each outcome is its own independent YES/NO market.
+// Prices do NOT need to sum to 100% across outcomes.
+// Each outcome has a pool value; price = sigmoid of pool bias.
+// This means "By 15/3 YES at 70¢" does NOT force "By 31/3" down.
+
+function outcomePrice(pool, b){
+  // Sigmoid: price = 1 / (1 + e^(-pool/b))
+  // When pool=0, price=50¢. Buying YES pushes pool up (price up). Buying NO pushes pool down.
+  const p = 1 / (1 + Math.exp(-(pool||0)/b));
+  return Math.max(.01, Math.min(.99, Math.round(p*100)/100));
+}
+
+function outcomeCost(pool, shares, side, b){
+  // Cost to move the pool by `shares` in the given direction
+  // side=yes: pool increases. side=no: pool decreases.
+  const dir = side==='yes' ? 1 : -1;
+  const newPool = (pool||0) + dir*shares;
+  // Cost = b * [ln(1+e^(newPool/b)) - ln(1+e^(pool/b))]
+  // For numerical stability use log-sum-exp
+  const logSumBefore = b * Math.log(1 + Math.exp((pool||0)/b));
+  const logSumAfter = b * Math.log(1 + Math.exp(newPool/b));
+  return Math.abs(logSumAfter - logSumBefore);
+}
+
+function cpmmBuy(market, oi, side, amount){
+  const m=JSON.parse(JSON.stringify(market));
+  const b=m.liquidity?m.liquidity*1.5:1500;
+
+  // Binary search for how many shares `amount` buys on this outcome
+  let lo=0, hi=amount*20;
+  for(let iter=0;iter<60;iter++){
+    const mid=(lo+hi)/2;
+    const cost=outcomeCost(m.outcomes[oi].pool||0, mid, side, b);
+    if(cost<amount) lo=mid; else hi=mid;
+  }
+  const shares=Math.round(lo*100)/100;
+
+  // Apply pool change (only to THIS outcome)
+  const dir = side==='yes' ? 1 : -1;
+  m.outcomes[oi].pool = (m.outcomes[oi].pool||0) + dir*shares;
+
+  // Recalculate price ONLY for the traded outcome
+  m.outcomes[oi].price = outcomePrice(m.outcomes[oi].pool, b);
+  m.outcomes[oi].history = [...(m.outcomes[oi].history||[m.outcomes[oi].price]), m.outcomes[oi].price];
+
+  m.volume=(m.volume||0)+amount;
+  m.traders=(m.traders||0)+1;
+
+  const avgPrice=shares>0?Math.round((amount/shares)*100)/100:0;
+  return {market:m, shares, avgPrice};
+}
+
+function cpmmSell(market, oi, side, shares){
+  const m=JSON.parse(JSON.stringify(market));
+  const b=m.liquidity?m.liquidity*1.5:1500;
+
+  // Selling = reversing the pool direction
+  const sellSide = side==='yes' ? 'no' : 'yes';
+  const saleValue=Math.round(outcomeCost(m.outcomes[oi].pool||0, shares, sellSide, b)*100)/100;
+
+  // Apply reverse pool change
+  const dir = side==='yes' ? -1 : 1;
+  m.outcomes[oi].pool = (m.outcomes[oi].pool||0) + dir*shares;
+
+  // Recalculate price ONLY for the sold outcome
+  m.outcomes[oi].price = outcomePrice(m.outcomes[oi].pool, b);
+  m.outcomes[oi].history = [...(m.outcomes[oi].history||[m.outcomes[oi].price]), m.outcomes[oi].price];
+
+  m.volume=(m.volume||0)+saleValue;
+
+  return {market:m, saleValue};
+}
+
 // ═══════════════════════════════════════════════════
-// PARIMUTUEL ENGINE
-// All money bet goes into a pool. When resolved,
-// the entire pool is split among winners proportionally.
-// Zero-sum guaranteed: total in = total out.
+// POOL TRACKING — Zero-sum settlement
+// The AMM handles price discovery, but payouts come
+// from the actual money pool. Total out = total in.
 // ═══════════════════════════════════════════════════
 
 function getMarketPool(market){
+  // Calculate real money in the pot from all trades
   const trades=S.trades.filter(t=>t.mid===market.id);
-  let total=0;
-  const byOutcome={};
+  let totalIn=0;
+  const byOutcome={};  // money bet on each outcome (YES side)
   market.outcomes.forEach((_,i)=>{byOutcome[i]=0});
   trades.forEach(t=>{
-    total+=t.amount;
-    byOutcome[t.outcomeIdx]=(byOutcome[t.outcomeIdx]||0)+t.amount;
+    if(t.isSell){
+      // Sells remove money from pool
+      totalIn+=t.amount; // amount is negative for sells
+    }else{
+      totalIn+=t.amount;
+      // Track which outcome the money is backing
+      if(t.side==='yes') byOutcome[t.outcomeIdx]=(byOutcome[t.outcomeIdx]||0)+t.amount;
+      // NO bets on outcome X are effectively YES bets spread across all other outcomes
+      // but for pool purposes we just track total money in
+    }
   });
-  return{total,byOutcome,trades};
-}
-
-function getImpliedOdds(market){
-  const pool=getMarketPool(market);
-  if(pool.total===0) return market.outcomes.map(()=>Math.round(100/market.outcomes.length));
-  return market.outcomes.map((_,i)=>Math.max(1,Math.round((pool.byOutcome[i]/pool.total)*100)));
-}
-
-function getPayoutMultiplier(market,outcomeIdx){
-  const pool=getMarketPool(market);
-  if(pool.byOutcome[outcomeIdx]===0||pool.total===0) return market.outcomes.length;
-  return pool.total/pool.byOutcome[outcomeIdx];
-}
-
-function calcPayout(market,trade){
-  const pool=getMarketPool(market);
-  const outcomePool=pool.byOutcome[trade.outcomeIdx]||0;
-  if(outcomePool===0)return 0;
-  return (trade.amount/outcomePool)*pool.total;
-}
-
-function poolBar(market){
-  const pool=getMarketPool(market);
-  const colors=[T,GN,'#6366F1','#F59E0B',RD,'#EC4899','#14B8A6','#8B5CF6'];
-  if(pool.total===0)return`<div style="height:6px;background:#E2E8F0;border-radius:3px"></div>`;
-  return`<div style="height:6px;border-radius:3px;overflow:hidden;display:flex;gap:1px">${market.outcomes.map((o,i)=>{
-    const pct=pool.total>0?(pool.byOutcome[i]/pool.total)*100:100/market.outcomes.length;
-    return`<div style="width:${Math.max(pct,2)}%;background:${colors[i%colors.length]};transition:width .3s" title="${o.label}: $${(pool.byOutcome[i]||0).toFixed(0)} (${Math.round(pct)}%)"></div>`;
-  }).join('')}</div>`;
+  return{total:Math.max(0,totalIn),byOutcome,trades};
 }
 
 // ── ACTIONS ──
@@ -287,9 +337,8 @@ function createMarket(){
   const labels=f.outcomes.filter(o=>o.trim());
   if(labels.length<2){flash("Need at least 2 outcomes","err");return}
   const m={id:Date.now(),title:f.title,description:f.desc||"No resolution criteria specified.",category:f.cat,endDate:f.end,creator:S.name,
-    outcomes:labels.map(l=>({label:l})),
-    volume:0,traders:0,resolved:false,winnerIdx:null,createdAt:new Date().toISOString(),
-    version:'parimutuel'};
+    outcomes:labels.map(l=>({label:l,price:.5,pool:0,history:[.5]})),
+    volume:0,liquidity:1000,traders:0,resolved:false,winnerIdx:null,createdAt:new Date().toISOString()};
   S.markets=[m,...S.markets];saveMarkets(S.markets);
   logActivity({type:'market_created',user:S.name,marketId:m.id,desc:`${S.name} created market: "${f.title}"`});
   S.creating=false;S.form={title:'',desc:'',cat:'Other',end:'',outcomes:['Yes','No']};
@@ -302,28 +351,50 @@ function trade(){
   if(a>S.portfolio.balance){flash("Insufficient balance","err");return}
   if(S.sel.resolved){flash("Market is resolved","err");return}
   const oc=S.sel.outcomes[S.selOc];
-  if(!oc){flash("Select an outcome","err");return}
-
+  const result=cpmmBuy(S.sel,S.selOc,S.side,a);
+  const updated=result.market, shares=result.shares, avgPrice=result.avgPrice;
+  if(shares<=0){flash("Trade too small","err");return}
   const rec={id:Date.now(),mid:S.sel.id,outcomeIdx:S.selOc,outcomeLabel:oc.label,
-    side:'yes',who:S.name,amount:a,title:S.sel.title,ts:Date.now()};
+    side:S.side,shares,avg:avgPrice,title:S.sel.title,who:S.name,amount:a,ts:Date.now()};
   saveTrade(rec);
-
-  const updated=JSON.parse(JSON.stringify(S.sel));
-  updated.volume=(updated.volume||0)+a;
-  updated.traders=(updated.traders||0)+1;
-
   S.portfolio.balance=Math.round((S.portfolio.balance-a)*100)/100;
   S.portfolio.positions.push(rec);savePortfolio();
   S.markets=S.markets.map(m=>m.id!==S.sel.id?m:updated);saveMarkets(S.markets);
   S.sel=updated;S.amt='';
-
-  const mult=getPayoutMultiplier(updated,S.selOc);
-  logActivity({type:'trade',user:S.name,marketId:S.sel.id,amount:a,outcome:oc.label,
-    desc:`${S.name} bet $${a} on "${oc.label}" (${mult.toFixed(1)}x payout)`});
-  flash(`Bet $${a} on "${oc.label}" — potential ${mult.toFixed(1)}x payout`);
+  logActivity({type:'trade',user:S.name,marketId:S.sel.id,amount:a,side:S.side,outcome:oc.label,
+    desc:`${S.name} bought ${shares} ${S.side.toUpperCase()} "${oc.label}" at ${Math.round(avgPrice*100)}¢ for $${a}`});
+  flash(`Bought ${shares} ${S.side.toUpperCase()} "${oc.label}" at ${Math.round(avgPrice*100)}¢`);
 }
 
-// Parimutuel: no selling positions — bets are final
+function sellPosition(posIdx){
+  const pos=S.portfolio.positions[posIdx];
+  if(!pos){flash("Position not found","err");return}
+  const mk=S.markets.find(m=>m.id===pos.mid);
+  if(!mk||mk.resolved){flash("Cannot sell — market resolved","err");return}
+
+  const result=cpmmSell(mk, pos.outcomeIdx, pos.side, pos.shares);
+  const updated=result.market, saleValue=result.saleValue;
+
+  if(saleValue<=0){flash("No sale value","err");return}
+
+  // Remove position from local portfolio
+  S.portfolio.positions.splice(posIdx,1);
+  S.portfolio.balance=Math.round((S.portfolio.balance+saleValue)*100)/100;
+  savePortfolio();
+
+  // Update market
+  S.markets=S.markets.map(m=>m.id!==mk.id?m:updated);saveMarkets(S.markets);
+  if(S.sel&&S.sel.id===mk.id) S.sel=updated;
+
+  // Log as a sell trade
+  const sellRec={id:Date.now(),mid:mk.id,outcomeIdx:pos.outcomeIdx,outcomeLabel:pos.outcomeLabel,
+    side:pos.side,shares:-pos.shares,avg:pos.avg,title:mk.title,who:S.name,amount:-saleValue,ts:Date.now(),isSell:true};
+  saveTrade(sellRec);
+
+  logActivity({type:'trade',user:S.name,marketId:mk.id,amount:saleValue,side:'sell',outcome:pos.outcomeLabel,
+    desc:`${S.name} sold ${pos.shares} ${pos.side.toUpperCase()} "${pos.outcomeLabel}" for $${saleValue}`});
+  flash(`Sold ${pos.shares} ${pos.side.toUpperCase()} "${pos.outcomeLabel}" for $${saleValue}`);
+}
 
 function saveEdit(){
   const ef=S.editForm,labels=ef.outcomes.filter(o=>o.trim());
@@ -341,28 +412,43 @@ function saveEdit(){
   S.editing=null;S.sel=u;flash("Market updated!");
 }
 
-// ── RESOLVE WITH PARIMUTUEL PAYOUT ──
+// ── RESOLVE WITH ZERO-SUM POOL PAYOUT ──
+// Instead of paying $1/share (which creates money), we distribute
+// the actual pool of money that was bet. Winners split the pot
+// proportional to their winning shares. Total out = total in.
 function resolveMarket(winnerIdx){
   const m=S.markets.find(x=>x.id===S.resolving.id);if(!m)return;
   const u=JSON.parse(JSON.stringify(m));
   u.resolved=true;u.winnerIdx=winnerIdx;u.resolvedAt=new Date().toISOString();u.resolvedBy=S.name;
+  u.outcomes.forEach((o,i)=>{o.price=i===winnerIdx?1:0;o.history=[...(o.history||[]),o.price]});
   S.markets=S.markets.map(x=>x.id===u.id?u:x);saveMarkets(S.markets);
 
-  // Calculate parimutuel payouts from pool
+  // Get actual money pool for this market
   const pool=getMarketPool(u);
   const totalPool=pool.total;
-  const winnerPool=pool.byOutcome[winnerIdx]||0;
 
-  const payoutsByUser={};
+  // Calculate winning shares per user
+  const winnerShares={};
+  let totalWinnerShares=0;
   S.trades.forEach(t=>{
     if(t.mid!==u.id||t.isSell)return;
-    if(t.outcomeIdx!==winnerIdx)return;
-    const payout=winnerPool>0?(t.amount/winnerPool)*totalPool:0;
-    if(!payoutsByUser[t.who])payoutsByUser[t.who]=0;
-    payoutsByUser[t.who]+=payout;
+    const won=(t.side==='yes'&&t.outcomeIdx===winnerIdx)||(t.side==='no'&&t.outcomeIdx!==winnerIdx);
+    if(won){
+      if(!winnerShares[t.who])winnerShares[t.who]=0;
+      winnerShares[t.who]+=t.shares;
+      totalWinnerShares+=t.shares;
+    }
   });
 
-  // Directly update each user's balance in Firebase — no IOUs
+  // Distribute the pool proportionally to winning shares
+  const payoutsByUser={};
+  if(totalWinnerShares>0){
+    Object.entries(winnerShares).forEach(([who,shares])=>{
+      payoutsByUser[who]=(shares/totalWinnerShares)*totalPool;
+    });
+  }
+
+  // Pay out from pool
   Object.entries(payoutsByUser).forEach(([who,amt])=>{
     if(amt<=0)return;
     const rounded=Math.round(amt*100)/100;
@@ -379,7 +465,6 @@ function resolveMarket(winnerIdx){
       S.users[key]=userData;
       localStorage.setItem('cmdp_users',JSON.stringify(S.users));
     }
-    // Update local portfolio if it's us
     if(who.toLowerCase()===S.name.toLowerCase()){
       S.portfolio.balance=Math.round((S.portfolio.balance+rounded)*100)/100;
       savePortfolio();
@@ -624,16 +709,17 @@ function getLeagueTable(){
     const ut=S.trades.filter(t=>canonicalName(t.who)===name);
     let vol=0,w=0,l=0,openValue=0;
     ut.forEach(t=>{
-      if(t.isSell)return;
+      if(t.isSell)return; // skip sell records
       vol+=Math.abs(t.amount||0);
       const mk=S.markets.find(m=>m.id===t.mid);
-      if(mk){
+      if(mk&&mk.outcomes[t.outcomeIdx]){
         if(mk.resolved&&!mk.cancelled){
-          if(t.outcomeIdx===mk.winnerIdx)w++;else l++;
+          const won=(t.side==='yes'&&t.outcomeIdx===mk.winnerIdx)||(t.side==='no'&&t.outcomeIdx!==mk.winnerIdx);
+          if(won)w++;else l++;
         }else if(!mk.resolved){
-          const pool=getMarketPool(mk);
-          const outcomePool=pool.byOutcome[t.outcomeIdx]||0;
-          if(outcomePool>0&&pool.total>0) openValue+=(t.amount/outcomePool)*pool.total-t.amount;
+          // Value open positions at current market price
+          const curPrice=t.side==='yes'?mk.outcomes[t.outcomeIdx].price:(1-mk.outcomes[t.outcomeIdx].price);
+          openValue+=curPrice*t.shares;
         }
       }
     });
@@ -778,18 +864,15 @@ function getLeaderboard(){
     if(!map[who])map[who]={name:who,trades:0,volume:0,pnl:0};
     map[who].trades++;map[who].volume+=Math.abs(t.amount||0);
     const mk=S.markets.find(m=>m.id===t.mid);
-    if(mk){
-      if(mk.resolved&&!mk.cancelled){
-        if(t.outcomeIdx===mk.winnerIdx){
-          const payout=calcPayout(mk,t);
-          map[who].pnl+=(payout-t.amount);
-        }else{
-          map[who].pnl+=(-t.amount);
-        }
-      }else if(!mk.resolved){
-        const pool=getMarketPool(mk);
-        const outcomePool=pool.byOutcome[t.outcomeIdx]||0;
-        if(outcomePool>0&&pool.total>0) map[who].pnl+=(t.amount/outcomePool)*pool.total-t.amount;
+    if(mk&&mk.outcomes[t.outcomeIdx]){
+      if(mk.resolved){
+        const won=(t.side==='yes'&&t.outcomeIdx===mk.winnerIdx)||(t.side==='no'&&t.outcomeIdx!==mk.winnerIdx);
+        if(mk.cancelled){/* no pnl */}
+        else if(won)map[who].pnl+=(t.shares-t.amount);
+        else map[who].pnl+=(-t.amount);
+      }else{
+        const cur=t.side==='yes'?mk.outcomes[t.outcomeIdx].price:(1-mk.outcomes[t.outcomeIdx].price);
+        map[who].pnl+=(cur-t.avg)*t.shares;
       }
     }
   });
@@ -880,7 +963,7 @@ function render(){
   </main>
   <footer>
     <div style="width:16px;height:16px;border-radius:3px;background:${T};display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:6.5px;color:#fff">CM</div>
-    <span>CMD<span style="color:${T}">predict</span></span><span>·</span><span>Parimutuel · Zero-sum betting 🍺</span>
+    <span>CMD<span style="color:${T}">predict</span></span><span>·</span><span>Zero-sum · Lowest balance buys the first round 🍺</span>
     ${useFirebase?'<span>·</span><span><span class="live-dot"></span>Real-time sync</span>':''}
   </footer>`;
 
@@ -1012,10 +1095,7 @@ function renderMarkets(list,tv,tt,lb){
     </div>
     ${list.length===0?`<div style="text-align:center;padding:60px 20px;background:#fff;border:1px solid var(--bdr);border-radius:12px"><div style="font-size:40px;margin-bottom:12px">🏛️</div><div style="font-size:16px;font-weight:600;margin-bottom:6px">${s.markets.length===0?'No markets yet':'No matches'}</div><div style="font-size:13.5px;color:var(--tx2);max-width:360px;margin:0 auto 20px">${s.markets.length===0?'Create the first prediction market.':'Try a different filter.'}</div>${s.markets.length===0?'<button class="btn btn-t" id="first-market-btn">Create First Market</button>':''}</div>`
     :`<div class="market-grid">${list.map((m,i)=>{
-      const pool=getMarketPool(m);
-      const odds=getImpliedOdds(m);
       const topOc=m.outcomes.slice(0,3);
-      const colors=[T,GN,'#6366F1','#F59E0B',RD,'#EC4899'];
       return`<div class="card" data-market-id="${m.id}" style="animation-delay:${i*.04}s;${m.resolved?'opacity:.6':''}">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">
           <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center">
@@ -1025,22 +1105,19 @@ function renderMarkets(list,tv,tt,lb){
           <div style="font-size:11px;color:var(--tx3)">${new Date(m.endDate).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}</div>
         </div>
         <div style="font-size:15px;font-weight:700;line-height:1.35;margin-bottom:14px;letter-spacing:-.01em">${m.title}</div>
-        ${!m.resolved&&pool.total>0?`<div style="margin-bottom:10px">${poolBar(m)}</div>`:''}
+        ${m.outcomes.length===2&&topOc[0]?.history?.length>1?`<div class="spark-area">${spark(topOc[0].history,320,34,T)}</div>`:''}
         <div style="display:flex;flex-direction:column;gap:2px;margin-bottom:12px">
-          ${topOc.map((o,j)=>{const pct=odds[j]||0;const w=m.resolved&&m.winnerIdx===j;
-            const mult=getPayoutMultiplier(m,j);
+          ${topOc.map((o,j)=>{const pct=Math.round(o.price*100),w=m.resolved&&m.winnerIdx===j;
+            const tier=w?'winner':pct>=65?'high':pct<=35?'low':'mid';
             return`<div class="mkt-outcome">
               <span class="mkt-outcome-label ${w?'winner':''}">${w?'✓ ':''}${o.label}</span>
-              <div style="display:flex;align-items:center;gap:6px">
-                ${!m.resolved&&pool.total>0?`<span style="font-size:10px;color:var(--tx3);font-family:'IBM Plex Mono',monospace">${mult.toFixed(1)}x</span>`:''}
-                <span class="mkt-odds ${w?'winner':pct>=50?'high':'mid'}">${w?'WON':pct+'%'}</span>
-              </div>
+              <span class="mkt-odds ${tier}">${w?'WON':pct+'%'}</span>
             </div>`}).join('')}
           ${m.outcomes.length>3?`<div style="font-size:11px;color:var(--tx3);padding:2px 0">+${m.outcomes.length-3} more</div>`:''}
         </div>
         <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--tx3);padding-top:10px;border-top:1px solid #F1F5F9">
           <span>${m.creator}</span>
-          <div style="display:flex;gap:10px">${pool.total>0?`<span>$${pool.total.toFixed(0)} pool</span>`:''}<span>${m.traders||0} bets</span></div>
+          <div style="display:flex;gap:10px">${m.volume?`<span>${fmtMoney(m.volume)} vol</span>`:''}<span>${m.traders||0} trades</span></div>
         </div>
       </div>`}).join('')}</div>`}`;
 }
@@ -1056,30 +1133,17 @@ function renderPortfolio(){
   });
 
   function posRow(p){
-    const mk=p._mk;
-    let impliedValue=p.amount,pnl=0;
-    if(mk){
-      if(mk.resolved&&!mk.cancelled){
-        if(p.outcomeIdx===mk.winnerIdx){impliedValue=calcPayout(mk,p)}else{impliedValue=0}
-      }else if(!mk.resolved){
-        const pool=getMarketPool(mk);
-        const outcomePool=pool.byOutcome[p.outcomeIdx]||0;
-        impliedValue=outcomePool>0?(p.amount/outcomePool)*pool.total:p.amount;
-      }
-    }
-    pnl=impliedValue-p.amount;
-    const mult=mk&&!mk.resolved?getPayoutMultiplier(mk,p.outcomeIdx):0;
+    const mk=p._mk;let cur=p.avg;
+    const canSell=mk&&!mk.resolved;
+    if(mk&&mk.outcomes[p.outcomeIdx]){const op=mk.outcomes[p.outcomeIdx].price;cur=p.side==='yes'?op:(1-op)}
+    const pnl=(cur-p.avg)*p.shares;
     return`<div style="background:var(--card);border:1px solid var(--bdr);border-radius:10px;padding:14px 16px;display:flex;justify-content:space-between;align-items:center;${p._resolved?'opacity:.6':''}">
       <div style="min-width:0;flex:1"><div style="font-size:13px;font-weight:600;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.title}</div>
-        <div style="display:flex;gap:8px;font-size:11px;color:var(--tx3);align-items:center;flex-wrap:wrap">
-          <span style="color:${T};font-weight:600">${p.outcomeLabel}</span>
-          <span class="m">$${p.amount} bet</span>
-          ${mult>0?`<span class="m" style="color:${GN}">${mult.toFixed(1)}x if wins</span>`:''}
-        </div>
+        <div style="display:flex;gap:8px;font-size:11px;color:var(--tx3);align-items:center;flex-wrap:wrap"><span class="pill" style="background:${p.side==='yes'?'rgba(22,163,74,.08)':'rgba(220,38,38,.08)'};color:${p.side==='yes'?GN:RD}">${p.side.toUpperCase()}</span><span style="color:${T};font-weight:600">${p.outcomeLabel}</span><span class="m">${Math.round(p.shares)} @ ${Math.round(p.avg*100)}¢</span></div>
       </div>
-      <div style="text-align:right;flex-shrink:0">
-        <div class="m" style="font-size:14px;font-weight:700;color:${pnl>=0?GN:RD}">${pnl>=0?'+':''}$${Math.abs(pnl).toFixed(0)}</div>
-        <div style="font-size:10px;color:var(--tx3)">value $${impliedValue.toFixed(0)}</div>
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="text-align:right;flex-shrink:0"><div class="m" style="font-size:14px;font-weight:700;color:${pnl>=0?GN:RD}">${pnl>=0?'+':''}$${Math.abs(pnl).toFixed(0)}</div><div style="font-size:10px;color:var(--tx3)">now ${Math.round(cur*100)}¢</div></div>
+        ${canSell?`<button class="btn btn-ghost sell-pos-btn" data-pos-idx="${p._idx}" style="padding:5px 10px;font-size:11px;color:${RD};border-color:rgba(220,38,38,.25)">Sell</button>`:''}
       </div>
     </div>`}
 
@@ -1088,11 +1152,9 @@ function renderPortfolio(){
   s.portfolio.positions.forEach(p=>{
     const mk=s.markets.find(m=>m.id===p.mid);
     totalCost+=(p.amount||0);
-    if(mk&&!mk.resolved){
-      const pool=getMarketPool(mk);
-      const outcomePool=pool.byOutcome[p.outcomeIdx]||0;
-      if(outcomePool>0&&pool.total>0) totalOpenVal+=(p.amount/outcomePool)*pool.total;
-      else totalOpenVal+=p.amount;
+    if(mk&&mk.outcomes[p.outcomeIdx]){
+      const cur=p.side==='yes'?mk.outcomes[p.outcomeIdx].price:(1-mk.outcomes[p.outcomeIdx].price);
+      totalOpenVal+=cur*p.shares;
     }
   });
   const netPnl=totalOpenVal+s.portfolio.balance-START_BAL;
@@ -1193,6 +1255,16 @@ function renderAdmin(){
       <div class="stat-card"><div class="stat-label">Total Markets</div><div class="m" style="font-size:20px;font-weight:700;color:${GN}">${S.markets.length}</div></div>
       <div class="stat-card"><div class="stat-label">Total Trades</div><div class="m" style="font-size:20px;font-weight:700;color:#F59E0B">${S.trades.length}</div></div>
       <div class="stat-card"><div class="stat-label">Activity Log</div><div class="m" style="font-size:20px;font-weight:700;color:#6366F1">${activityLog.length}</div></div>
+    </div>
+
+    <div style="background:linear-gradient(135deg,#FFF7ED,#FEF3C7);border:1px solid #FDE68A;border-radius:10px;padding:16px;margin-bottom:20px">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+        <div>
+          <div style="font-size:13px;font-weight:700;color:#92400E;margin-bottom:4px">🔄 v5 Fresh Start</div>
+          <div style="font-size:11.5px;color:#B45309;line-height:1.4">Reset all balances to $${START_BAL.toLocaleString()}, wipe all trades & positions, keep markets. Zero-sum from here on.</div>
+        </div>
+        <button class="btn" id="v5-migrate-btn" style="background:#DC2626;color:#fff;padding:8px 16px;font-size:12px;white-space:nowrap">Reset & Migrate</button>
+      </div>
     </div>
 
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
@@ -1333,51 +1405,57 @@ function mountAddUser(){
 function mountDetail(){
   const s=S,m=s.sel,admin=isAdmin(),canEdit=admin||m.creator===s.name;
 
-  const pool=getMarketPool(m);
-  const odds=getImpliedOdds(m);
+  // Get recent trades on this market
   const marketTrades=[...S.trades].filter(t=>t.mid===m.id).sort((a,b)=>b.ts-a.ts).slice(0,10);
-  const colors=[T,GN,'#6366F1','#F59E0B',RD,'#EC4899','#14B8A6','#8B5CF6'];
 
   let html=`<div class="overlay" id="detail-overlay"><div class="modal modal-lg">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">
       <div><div style="display:flex;gap:5px;margin-bottom:5px;flex-wrap:wrap">
         <span class="pill" style="background:${TL};color:${T}">${CI[m.category]||'🔮'} ${m.category}</span>
-        <span class="pill" style="background:#F0F4FF;color:#6366F1">${m.outcomes.length} outcomes</span>
+        <span class="pill" style="background:#F0F4FF;color:#6366F1">${m.outcomes.length} contracts</span>
         ${m.resolved?`<span class="${m.cancelled?'cancelled-badge':'resolved-badge'}">${m.cancelled?'CANCELLED':'RESOLVED'}</span>`:''}</div>
         <h2 style="font-size:16.5px;font-weight:700;line-height:1.4">${m.title}</h2></div>
       <button class="xbtn" id="close-detail">×</button></div>
     <p style="font-size:13px;color:var(--tx2);line-height:1.5;margin-bottom:14px">${m.description}</p>
     ${canEdit&&!m.resolved?`<div style="display:flex;gap:6px;margin-bottom:14px"><button class="btn btn-ghost" id="edit-market-btn">✏️ Edit</button>${admin?`<button class="btn btn-ghost" id="resolve-market-btn" style="border-color:#F59E0B;color:#B45309">🏁 Resolve</button>`:''}</div>`:''}
-    ${m.resolved&&m.resolvedBy?`<div style="font-size:12px;color:${m.cancelled?'#92400E':'#166534'};margin-bottom:12px;padding:8px 12px;background:${m.cancelled?'#FEF3C7':'#F0FDF4'};border-radius:6px;border:1px solid ${m.cancelled?'#FDE68A':'#BBF7D0'}">${m.cancelled?'Cancelled — all refunded':'Resolved: <strong>'+m.outcomes[m.winnerIdx]?.label+'</strong> won — pool of $'+pool.total.toFixed(0)+' distributed'} — by ${m.resolvedBy}</div>`:''}
-    <div style="font-size:11px;font-weight:600;color:var(--tx3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Outcomes · Pool: $${pool.total.toFixed(0)}</div>
-    ${pool.total>0?`<div style="margin-bottom:10px">${poolBar(m)}</div>`:''}
+    ${m.resolved&&m.resolvedBy?`<div style="font-size:12px;color:${m.cancelled?'#92400E':'#166534'};margin-bottom:12px;padding:8px 12px;background:${m.cancelled?'#FEF3C7':'#F0FDF4'};border-radius:6px;border:1px solid ${m.cancelled?'#FDE68A':'#BBF7D0'}">${m.cancelled?'Cancelled':'Resolved: <strong>'+m.outcomes[m.winnerIdx]?.label+'</strong> won'} — by ${m.resolvedBy}</div>`:''}
+    <div style="font-size:11px;font-weight:600;color:var(--tx3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Contracts</div>
     <div style="display:flex;flex-direction:column;gap:5px;margin-bottom:16px">
-      ${m.outcomes.map((o,j)=>{const pct=odds[j]||0,active=s.selOc===j,w=m.resolved&&m.winnerIdx===j;
-        const mult=getPayoutMultiplier(m,j);
-        const poolAmt=pool.byOutcome[j]||0;
-        return`<div class="outcome-row" data-idx="${j}" style="display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:8px;cursor:pointer;border:2px solid ${active&&!m.resolved?colors[j%colors.length]:'transparent'};background:${w?'#F0FDF4':active?'var(--tll)':'#F8FAFC'};transition:all .12s">
-          <div style="width:6px;height:32px;border-radius:3px;background:${colors[j%colors.length]};flex-shrink:0"></div>
+      ${m.outcomes.map((o,j)=>{const pct=Math.round(o.price*100),active=s.selOc===j,w=m.resolved&&m.winnerIdx===j;
+        const hasChart=o.history&&o.history.length>1;
+        const isBinary=m.outcomes.length===2;
+        const showByDefault=isBinary;
+        return`<div>
+          <div class="outcome-row" data-idx="${j}" style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;cursor:pointer;border:2px solid ${active&&!m.resolved?T:'transparent'};background:${w?'#F0FDF4':active?'var(--tll)':'#F8FAFC'}">
           <div style="flex:1;min-width:0">
-            <div style="display:flex;align-items:center;gap:8px;font-size:13.5px;font-weight:600;color:${w?GN:'var(--tx)'}">${w?'✓ ':''}${o.label}</div>
-            <div style="display:flex;gap:12px;font-size:11px;color:var(--tx3);margin-top:4px">
-              <span>$${poolAmt.toFixed(0)} bet</span>
-              ${!m.resolved?`<span style="color:${GN};font-weight:600">${mult.toFixed(1)}x payout</span>`:''}
+            <div style="display:flex;align-items:center;gap:8px;font-size:13.5px;font-weight:600;color:${w?GN:'var(--tx)'}">
+              ${w?'✓ ':''}${o.label}
+              ${hasChart?`<button class="chart-toggle" data-oc="${j}" style="display:inline-flex;align-items:center;gap:4px;background:${showByDefault?'var(--tl)':'#F1F5F9'};border:1px solid ${showByDefault?T:'var(--bdr)'};border-radius:6px;padding:3px 8px;font-size:10.5px;color:${showByDefault?T:'var(--tx3)'};cursor:pointer;font-family:inherit;transition:all .12s;font-weight:500"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M1 9L4 5L7 7L11 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Chart</button>`:''}
             </div>
-            <div style="height:4px;border-radius:2px;background:#E2E8F0;overflow:hidden;margin-top:6px"><div style="height:100%;border-radius:2px;background:${w?GN:colors[j%colors.length]};width:${pct}%;transition:width .3s"></div></div>
+            <div style="height:4px;border-radius:2px;background:#E2E8F0;overflow:hidden;margin-top:6px"><div style="height:100%;border-radius:2px;background:${w?GN:T};width:${pct}%"></div></div>
           </div>
-          <div style="text-align:right;flex-shrink:0"><div class="m" style="font-size:20px;font-weight:700;color:${w?GN:colors[j%colors.length]}">${w?'WON':pct+'%'}</div></div>
+          <div style="text-align:right;flex-shrink:0"><div class="m" style="font-size:18px;font-weight:700;color:${w?GN:T}">${pct}¢</div></div>
+        </div>
+        <div class="chart-panel" data-oc="${j}" style="display:${showByDefault&&hasChart?'block':'none'};padding:4px 0 8px;margin:0 4px">
+          <div style="background:#FAFBFC;border:1px solid var(--bdr);border-radius:8px;padding:8px;position:relative">
+            <canvas id="chart-${j}" style="width:100%;display:block"></canvas>
+          </div>
+        </div>
         </div>`}).join('')}
     </div>
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:16px">
-      ${[{l:'Total Pool',v:'$'+pool.total.toFixed(0)},{l:'Bettors',v:m.traders||0},{l:'Ends',v:new Date(m.endDate).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}].map(x=>`<div style="text-align:center"><div style="font-size:9px;color:var(--tx3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:2px">${x.l}</div><div class="m" style="font-size:12px;font-weight:600;color:#334155">${x.v}</div></div>`).join('')}
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:16px">
+      ${[{l:'Volume',v:m.volume?'$'+(m.volume/1000).toFixed(1)+'K':'$0'},{l:'Liquidity',v:'$'+(m.liquidity/1000).toFixed(1)+'K'},{l:'Trades',v:m.traders||0},{l:'Ends',v:new Date(m.endDate).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}].map(x=>`<div style="text-align:center"><div style="font-size:9px;color:var(--tx3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:2px">${x.l}</div><div class="m" style="font-size:12px;font-weight:600;color:#334155">${x.v}</div></div>`).join('')}
     </div>
     ${m.resolved||S.isGuest?'':`<div style="background:#F8FAFC;border-radius:8px;padding:16px;border:1px solid var(--bdr)">
-      <div style="font-size:12px;font-weight:600;color:#334155;margin-bottom:4px">Bet on: <span style="color:${colors[s.selOc%colors.length]}">${m.outcomes[s.selOc]?.label||''}</span></div>
-      <div style="font-size:11px;color:var(--tx3);margin-bottom:10px">Current payout: ${getPayoutMultiplier(m,s.selOc).toFixed(1)}x · Your bet joins the pool and shifts the odds</div>
+      <div style="font-size:12px;font-weight:600;color:#334155;margin-bottom:10px">Trading: <span style="color:${T}">${m.outcomes[s.selOc]?.label||''}</span></div>
+      <div style="display:flex;margin-bottom:10px;background:#EEF2F7;border-radius:5px;padding:2px">
+        <button class="side-btn" data-side="yes" style="flex:1;padding:7px;border:none;border-radius:4px;cursor:pointer;font-family:'Source Sans 3',sans-serif;font-weight:600;font-size:12.5px;background:${s.side==='yes'?GN:'transparent'};color:${s.side==='yes'?'#fff':'var(--tx3)'}">Buy YES ${Math.round((m.outcomes[s.selOc]?.price||.5)*100)}¢</button>
+        <button class="side-btn" data-side="no" style="flex:1;padding:7px;border:none;border-radius:4px;cursor:pointer;font-family:'Source Sans 3',sans-serif;font-weight:600;font-size:12.5px;background:${s.side==='no'?RD:'transparent'};color:${s.side==='no'?'#fff':'var(--tx3)'}">Buy NO ${Math.round((1-(m.outcomes[s.selOc]?.price||.5))*100)}¢</button>
+      </div>
       <input type="number" id="trade-amount" placeholder="Amount ($)" value="${s.amt}" style="margin-bottom:6px">
       <div id="trade-preview" style="font-size:12px;color:var(--tx2);margin-bottom:6px"></div>
-      <button class="btn" id="trade-btn" style="width:100%;padding:10px;font-size:13.5px;background:${colors[s.selOc%colors.length]};color:#fff">Place Bet</button>
-      <div style="font-size:10px;color:var(--tx3);text-align:center;margin-top:6px">Balance: $${s.portfolio.balance.toLocaleString()} · Bets are final (no selling)</div>
+      <button class="btn" id="trade-btn" style="width:100%;padding:10px;font-size:13.5px;background:${s.side==='yes'?GN:RD};color:#fff">Buy ${s.side.toUpperCase()}</button>
+      <div style="font-size:10px;color:var(--tx3);text-align:center;margin-top:6px">Balance: $${s.portfolio.balance.toLocaleString()}</div>
     </div>`}
 
     ${marketTrades.length>0?`
@@ -1407,22 +1485,51 @@ function mountDetail(){
     const a=parseFloat(amtInput?.value||'0');
     S.amt=amtInput?.value||'';
     if(a>0&&m.outcomes[s.selOc]){
-      const currentPool=pool.total+a;
-      const currentOutcomePool=(pool.byOutcome[s.selOc]||0)+a;
-      const newMult=currentPool/currentOutcomePool;
-      const payout=a*newMult;
-      if(preview)preview.innerHTML=`<div style="display:flex;justify-content:space-between"><span>After your bet: ${newMult.toFixed(1)}x payout</span><span style="color:${GN};font-weight:600">Win: $${payout.toFixed(0)} (+$${(payout-a).toFixed(0)})</span></div>`;
-      if(tradeBtn)tradeBtn.textContent=`Place Bet · $${S.amt}`;
+      const est=cpmmBuy(JSON.parse(JSON.stringify(m)),s.selOc,s.side,a);
+      const sh=est.shares.toFixed(1),ap=Math.round(est.avgPrice*100);
+      if(preview)preview.innerHTML=`<div style="display:flex;justify-content:space-between"><span>${sh} shares @ avg ${ap}¢</span><span style="color:${GN};font-weight:600">Payout if wins: $${est.shares.toFixed(0)}</span></div>`;
+      if(tradeBtn)tradeBtn.textContent=`Buy ${s.side.toUpperCase()} · $${S.amt}`;
     }else{
       if(preview)preview.innerHTML='';
-      if(tradeBtn)tradeBtn.textContent='Place Bet';
+      if(tradeBtn)tradeBtn.textContent=`Buy ${s.side.toUpperCase()}`;
     }
   }
   if(amtInput){amtInput.addEventListener('input',updatePreview);updatePreview()}
 
   document.getElementById('close-detail').onclick=()=>{S.sel=null;render()};
   document.getElementById('detail-overlay').onclick=e=>{if(e.target===e.currentTarget){S.sel=null;render()}};
-  document.querySelectorAll('.outcome-row').forEach(el=>{el.onclick=()=>{if(!S.sel.resolved){S.selOc=parseInt(el.dataset.idx);render()}}});
+  document.querySelectorAll('.outcome-row').forEach(el=>{el.onclick=()=>{if(!S.sel.resolved){S.selOc=parseInt(el.dataset.idx);S.side='yes';render()}}});
+  document.querySelectorAll('.chart-toggle').forEach(el=>{
+    el.onclick=e=>{
+      e.stopPropagation();
+      const j=el.dataset.oc;
+      const panel=document.querySelector(`.chart-panel[data-oc="${j}"]`);
+      if(panel){
+        const showing=panel.style.display!=='none';
+        panel.style.display=showing?'none':'block';
+        el.style.background=showing?'#F1F5F9':'var(--tl)';
+        el.style.borderColor=showing?'var(--bdr)':T;
+        el.style.color=showing?'var(--tx3)':T;
+        if(!showing){
+          // Mount chart when first shown
+          const oc=m.outcomes[parseInt(j)];
+          const w2=m.resolved&&m.winnerIdx===parseInt(j);
+          if(oc&&oc.history&&oc.history.length>1){
+            setTimeout(()=>mountInteractiveChart('chart-'+j,oc.history,w2?GN:T,marketTrades,oc.label),50);
+          }
+        }
+      }
+    };
+  });
+  // Mount charts that are visible by default (binary markets)
+  m.outcomes.forEach((o,j)=>{
+    const panel=document.querySelector(`.chart-panel[data-oc="${j}"]`);
+    if(panel&&panel.style.display!=='none'&&o.history&&o.history.length>1){
+      const w2=m.resolved&&m.winnerIdx===j;
+      mountInteractiveChart('chart-'+j,o.history,w2?GN:T,marketTrades,o.label);
+    }
+  });
+  document.querySelectorAll('.side-btn').forEach(el=>{el.onclick=e=>{e.stopPropagation();S.side=el.dataset.side;render()}});
   if(tradeBtn)tradeBtn.onclick=trade;
   if(document.getElementById('edit-market-btn'))document.getElementById('edit-market-btn').onclick=()=>{
     S.editing=S.sel;S.editForm={title:S.sel.title,desc:S.sel.description,end:S.sel.endDate,outcomes:S.sel.outcomes.map(o=>o.label)};render()};
@@ -1515,6 +1622,9 @@ function bindEvents(){
   document.getElementById('search-input')?.addEventListener('input',e=>{S.q=e.target.value;render()});
   document.getElementById('sort-select')?.addEventListener('change',e=>{S.sort=e.target.value;render()});
   document.querySelectorAll('.cat-btn').forEach(el=>{el.onclick=()=>{S.cat=el.dataset.cat;render()}});
+  document.querySelectorAll('.sell-pos-btn').forEach(el=>{
+    el.onclick=e=>{e.stopPropagation();const idx=parseInt(el.dataset.posIdx);if(confirm('Sell this position?'))sellPosition(idx)};
+  });
   document.querySelectorAll('[data-market-id]').forEach(el=>{
     el.onclick=()=>{const m=S.markets.find(x=>x.id===parseInt(el.dataset.marketId));if(m){S.sel=m;S.selOc=0;S.side='yes';S.amt='';render()}}});
 
@@ -1568,6 +1678,48 @@ function bindEvents(){
     document.getElementById('end-season-btn').onclick=()=>{S.endingSeasonModal=true;render()};
   if(document.getElementById('start-season-btn'))
     document.getElementById('start-season-btn').onclick=()=>{const label=prompt('Season name?','Season '+(S.seasons.length+1));if(label!==null)startNewSeason(label)};
+  if(document.getElementById('v5-migrate-btn'))
+    document.getElementById('v5-migrate-btn').onclick=migrateV5;
+}
+
+// ── V5 MIGRATION: reset balances, wipe trades, keep markets ──
+function migrateV5(){
+  if(!confirm('⚠️ This will:\n\n• Reset ALL analyst balances to $'+START_BAL.toLocaleString()+'\n• Delete ALL trade history\n• Clear ALL positions\n• Keep all markets (questions stay)\n• Reset market volume/trade counts to 0\n\nThis cannot be undone. Continue?'))return;
+  const check=prompt('Type OK to confirm:');
+  if(check!=='OK'){flash('Migration cancelled.','err');return}
+
+  // 1. Reset all analyst balances
+  ANALYSTS.forEach(name=>{
+    const key=encodeKey(name);
+    const u={name,balance:START_BAL,lastSeen:Date.now()};
+    if(useFirebase)db.ref('users/'+key).set(u);
+    else S.users[key]=u;
+    if(name.toLowerCase()===S.name.toLowerCase()){
+      S.portfolio.balance=START_BAL;
+      S.portfolio.positions=[];
+      savePortfolio();
+    }
+  });
+
+  // 2. Wipe all trades
+  if(useFirebase)db.ref('trades').set(null);
+  else localStorage.setItem('cmdp_trades','[]');
+  S.trades=[];
+
+  // 3. Reset unresolved market stats (keep questions/outcomes intact)
+  const cleaned=S.markets.map(m=>{
+    const c=JSON.parse(JSON.stringify(m));
+    if(!c.resolved){c.volume=0;c.traders=0}
+    return c;
+  });
+  S.markets=cleaned;saveMarkets(cleaned);
+
+  // 4. Save
+  if(!useFirebase)localStorage.setItem('cmdp_users',JSON.stringify(S.users));
+
+  logActivity({type:'migration',user:S.name,desc:`🔄 ${S.name} migrated to v5 zero-sum — all balances reset to $${START_BAL.toLocaleString()}, trades wiped`});
+  flash('Migration complete! Fresh start with zero-sum settlement.');
+  render();
 }
 
 // Start
