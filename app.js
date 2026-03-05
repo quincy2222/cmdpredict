@@ -383,7 +383,7 @@ function createMarket(){
   if(!f.title||!f.end){flash("Title and end date required","err");return}
   const labels=f.outcomes.filter(o=>o.trim());
   if(labels.length<2){flash("Need at least 2 outcomes","err");return}
-  const liq=f.marketType==='exclusive'?1000:700;
+  const liq=f.marketType==='exclusive'?3000:700;
   const initPrice=f.marketType==='exclusive'?Math.round((1/labels.length)*100)/100:0.5;
   const m={id:Date.now(),title:f.title,description:f.desc||"No resolution criteria specified.",category:f.cat,endDate:f.end,creator:S.name,
     marketType:f.marketType||'exclusive',
