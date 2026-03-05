@@ -195,51 +195,59 @@ function getUserStats(userName){
   return{trades:tradeDetails,totalVolume,totalPnl,wins,losses,totalTrades:userTrades.length};
 }
 
-// ── AMM (Independent Binary Outcomes) ──
-// Each outcome is its own independent YES/NO market.
-// Prices do NOT need to sum to 100% across outcomes.
-// Each outcome has a pool value; price = sigmoid of pool bias.
-// This means "By 15/3 YES at 70¢" does NOT force "By 31/3" down.
+// ── AMM (LMSR — Logarithmic Market Scoring Rule) ──
+// Prices ALWAYS sum to 100% across outcomes.
+// Each outcome has a weight (q). Price = softmax(q/b).
+// Buying YES on outcome i pushes its price UP and all others DOWN.
+// Buying NO on outcome i pushes its price DOWN and all others UP.
 
-function outcomePrice(pool, b){
-  // Sigmoid: price = 1 / (1 + e^(-pool/b))
-  // When pool=0, price=50¢. Buying YES pushes pool up (price up). Buying NO pushes pool down.
-  const p = 1 / (1 + Math.exp(-(pool||0)/b));
-  return Math.max(.01, Math.min(.99, Math.round(p*100)/100));
+function lmsrPrices(outcomes, b){
+  // softmax: price_i = e^(q_i/b) / sum(e^(q_j/b))
+  const qs=outcomes.map(o=>o.pool||0);
+  const maxQ=Math.max(...qs); // numerical stability
+  const exps=qs.map(q=>Math.exp((q-maxQ)/b));
+  const sumExp=exps.reduce((a,v)=>a+v,0);
+  return exps.map(e=>Math.max(.01,Math.min(.99,Math.round((e/sumExp)*100)/100)));
 }
 
-function outcomeCost(pool, shares, side, b){
-  // Cost to move the pool by `shares` in the given direction
-  // side=yes: pool increases. side=no: pool decreases.
-  const dir = side==='yes' ? 1 : -1;
-  const newPool = (pool||0) + dir*shares;
-  // Cost = b * [ln(1+e^(newPool/b)) - ln(1+e^(pool/b))]
-  // For numerical stability use log-sum-exp
-  const logSumBefore = b * Math.log(1 + Math.exp((pool||0)/b));
-  const logSumAfter = b * Math.log(1 + Math.exp(newPool/b));
-  return Math.abs(logSumAfter - logSumBefore);
+function lmsrCost(outcomes, oi, shares, side, b){
+  // Cost of buying `shares` on outcome `oi`
+  // C = b * ln(sum(e^(q_j/b))) — evaluated before and after the move
+  const before=outcomes.map(o=>o.pool||0);
+  const after=[...before];
+  const dir=side==='yes'?1:-1;
+  after[oi]+=dir*shares;
+
+  function logSumExp(qs){
+    const mx=Math.max(...qs);
+    return mx+Math.log(qs.reduce((a,q)=>a+Math.exp((q-mx)/b),0));
+  }
+  return Math.abs(b*logSumExp(after)-b*logSumExp(before));
 }
 
 function cpmmBuy(market, oi, side, amount){
   const m=JSON.parse(JSON.stringify(market));
-  const b=m.liquidity?m.liquidity*1.5:1500;
+  const b=20; // LMSR sensitivity tuned for 5 analysts with $10K each
 
-  // Binary search for how many shares `amount` buys on this outcome
+  // Binary search for how many shares `amount` buys
   let lo=0, hi=amount*20;
   for(let iter=0;iter<60;iter++){
     const mid=(lo+hi)/2;
-    const cost=outcomeCost(m.outcomes[oi].pool||0, mid, side, b);
+    const cost=lmsrCost(m.outcomes, oi, mid, side, b);
     if(cost<amount) lo=mid; else hi=mid;
   }
   const shares=Math.round(lo*100)/100;
 
-  // Apply pool change (only to THIS outcome)
-  const dir = side==='yes' ? 1 : -1;
-  m.outcomes[oi].pool = (m.outcomes[oi].pool||0) + dir*shares;
+  // Apply pool change
+  const dir=side==='yes'?1:-1;
+  m.outcomes[oi].pool=(m.outcomes[oi].pool||0)+dir*shares;
 
-  // Recalculate price ONLY for the traded outcome
-  m.outcomes[oi].price = outcomePrice(m.outcomes[oi].pool, b);
-  m.outcomes[oi].history = [...(m.outcomes[oi].history||[m.outcomes[oi].price]), m.outcomes[oi].price];
+  // Recalculate ALL prices (they always sum to 100%)
+  const prices=lmsrPrices(m.outcomes, b);
+  m.outcomes.forEach((o,i)=>{
+    o.price=prices[i];
+    o.history=[...(o.history||[o.price]),o.price];
+  });
 
   m.volume=(m.volume||0)+amount;
   m.traders=(m.traders||0)+1;
@@ -250,22 +258,24 @@ function cpmmBuy(market, oi, side, amount){
 
 function cpmmSell(market, oi, side, shares){
   const m=JSON.parse(JSON.stringify(market));
-  const b=m.liquidity?m.liquidity*1.5:1500;
+  const b=20; // LMSR sensitivity tuned for 5 analysts with $10K each
 
   // Selling = reversing the pool direction
-  const sellSide = side==='yes' ? 'no' : 'yes';
-  const saleValue=Math.round(outcomeCost(m.outcomes[oi].pool||0, shares, sellSide, b)*100)/100;
+  const sellSide=side==='yes'?'no':'yes';
+  const saleValue=Math.round(lmsrCost(m.outcomes, oi, shares, sellSide, b)*100)/100;
 
   // Apply reverse pool change
-  const dir = side==='yes' ? -1 : 1;
-  m.outcomes[oi].pool = (m.outcomes[oi].pool||0) + dir*shares;
+  const dir=side==='yes'?-1:1;
+  m.outcomes[oi].pool=(m.outcomes[oi].pool||0)+dir*shares;
 
-  // Recalculate price ONLY for the sold outcome
-  m.outcomes[oi].price = outcomePrice(m.outcomes[oi].pool, b);
-  m.outcomes[oi].history = [...(m.outcomes[oi].history||[m.outcomes[oi].price]), m.outcomes[oi].price];
+  // Recalculate ALL prices
+  const prices=lmsrPrices(m.outcomes, b);
+  m.outcomes.forEach((o,i)=>{
+    o.price=prices[i];
+    o.history=[...(o.history||[o.price]),o.price];
+  });
 
   m.volume=(m.volume||0)+saleValue;
-
   return {market:m, saleValue};
 }
 
@@ -336,8 +346,9 @@ function createMarket(){
   if(!f.title||!f.end){flash("Title and end date required","err");return}
   const labels=f.outcomes.filter(o=>o.trim());
   if(labels.length<2){flash("Need at least 2 outcomes","err");return}
+  const initPrice=Math.round((1/labels.length)*100)/100;
   const m={id:Date.now(),title:f.title,description:f.desc||"No resolution criteria specified.",category:f.cat,endDate:f.end,creator:S.name,
-    outcomes:labels.map(l=>({label:l,price:.5,pool:0,history:[.5]})),
+    outcomes:labels.map(l=>({label:l,price:initPrice,pool:0,history:[initPrice]})),
     volume:0,liquidity:1000,traders:0,resolved:false,winnerIdx:null,createdAt:new Date().toISOString()};
   S.markets=[m,...S.markets];saveMarkets(S.markets);
   logActivity({type:'market_created',user:S.name,marketId:m.id,desc:`${S.name} created market: "${f.title}"`});
@@ -401,12 +412,15 @@ function saveEdit(){
   if(labels.length<2){flash("Need at least 2 outcomes","err");return}
   const m=S.markets.find(x=>x.id===S.editing.id);if(!m)return;
   const u=JSON.parse(JSON.stringify(m));
-  const b=u.liquidity?u.liquidity*1.5:1500;
+  const b=20; // LMSR sensitivity tuned for 5 analysts with $10K each
   u.outcomes=labels.map(label=>{
     const ex=u.outcomes.find(o=>o.label===label);
-    if(ex)return ex; // Keep existing outcome with its pool/price/history intact
-    return{label,price:.5,pool:0,history:[.5]}; // New outcome starts at 50%
+    if(ex)return ex;
+    return{label,price:Math.round(100/labels.length)/100,pool:0,history:[Math.round(100/labels.length)/100]};
   });
+  // Recalculate all prices to ensure they sum to 100%
+  const prices=lmsrPrices(u.outcomes, b);
+  u.outcomes.forEach((o,i)=>{o.price=prices[i]});
   if(ef.title)u.title=ef.title;if(ef.desc)u.description=ef.desc;if(ef.end)u.endDate=ef.end;
   S.markets=S.markets.map(x=>x.id===u.id?u:x);saveMarkets(S.markets);
   S.editing=null;S.sel=u;flash("Market updated!");
@@ -1444,7 +1458,7 @@ function mountDetail(){
         </div>`}).join('')}
     </div>
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:16px">
-      ${[{l:'Volume',v:m.volume?'$'+(m.volume/1000).toFixed(1)+'K':'$0'},{l:'Liquidity',v:'$'+(m.liquidity/1000).toFixed(1)+'K'},{l:'Trades',v:m.traders||0},{l:'Ends',v:new Date(m.endDate).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}].map(x=>`<div style="text-align:center"><div style="font-size:9px;color:var(--tx3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:2px">${x.l}</div><div class="m" style="font-size:12px;font-weight:600;color:#334155">${x.v}</div></div>`).join('')}
+      ${[{l:'Volume',v:m.volume?'$'+(m.volume/1000).toFixed(1)+'K':'$0'},{l:'Pool',v:'$'+getMarketPool(m).total.toFixed(0)},{l:'Trades',v:m.traders||0},{l:'Ends',v:new Date(m.endDate).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}].map(x=>`<div style="text-align:center"><div style="font-size:9px;color:var(--tx3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:2px">${x.l}</div><div class="m" style="font-size:12px;font-weight:600;color:#334155">${x.v}</div></div>`).join('')}
     </div>
     ${m.resolved||S.isGuest?'':`<div style="background:#F8FAFC;border-radius:8px;padding:16px;border:1px solid var(--bdr)">
       <div style="font-size:12px;font-weight:600;color:#334155;margin-bottom:10px">Trading: <span style="color:${T}">${m.outcomes[s.selOc]?.label||''}</span></div>
@@ -1540,7 +1554,7 @@ function mountCreate(){
   const f=S.form;
   let html=`<div class="overlay" id="create-overlay"><div class="modal">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px"><h2 style="font-size:16.5px;font-weight:700">Create a New Market</h2><button class="xbtn" id="close-create">×</button></div>
-    <p style="font-size:12.5px;color:var(--tx2);margin-bottom:16px;line-height:1.5">Each outcome can be traded YES or NO — prices normalise to 100%.</p>
+    <p style="font-size:12.5px;color:var(--tx2);margin-bottom:16px;line-height:1.5">Prices always sum to 100%. Buying one outcome pushes the others down.</p>
     <div style="display:flex;flex-direction:column;gap:12px">
       <div><label style="font-size:11px;color:var(--tx2);margin-bottom:4px;display:block;font-weight:600">Question *</label><input id="f-title" placeholder="e.g. How many OKR meetings in Q3?" value="${f.title}"></div>
       <div><label style="font-size:11px;color:var(--tx2);margin-bottom:4px;display:block;font-weight:600">Resolution Criteria</label><textarea id="f-desc" rows="2" placeholder="How does this resolve?" style="resize:vertical">${f.desc}</textarea></div>
