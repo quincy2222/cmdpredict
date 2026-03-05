@@ -239,7 +239,14 @@ function sigmoidCost(pool, shares, side, b){
 // ── Unified buy/sell that routes based on market type ──
 
 function getB(market){
-  return (market.marketType||'exclusive')==='exclusive'?20:1000;
+  // After migration (fresh markets), use lower liquidity for responsive prices
+  // Pre-migration markets have liquidity=1000 and large pool values, so b=1500 keeps them stable
+  const liq=market.liquidity||1000;
+  if((market.marketType||'exclusive')==='exclusive'){
+    return liq*1.5; // LMSR: uses same scale as stored pool values
+  }else{
+    return liq*1.5; // Independent sigmoid: same scale
+  }
 }
 
 function cpmmBuy(market, oi, side, amount){
@@ -376,11 +383,12 @@ function createMarket(){
   if(!f.title||!f.end){flash("Title and end date required","err");return}
   const labels=f.outcomes.filter(o=>o.trim());
   if(labels.length<2){flash("Need at least 2 outcomes","err");return}
+  const liq=f.marketType==='exclusive'?15:700;
   const initPrice=f.marketType==='exclusive'?Math.round((1/labels.length)*100)/100:0.5;
   const m={id:Date.now(),title:f.title,description:f.desc||"No resolution criteria specified.",category:f.cat,endDate:f.end,creator:S.name,
     marketType:f.marketType||'exclusive',
     outcomes:labels.map(l=>({label:l,price:initPrice,pool:0,history:[initPrice]})),
-    volume:0,liquidity:1000,traders:0,resolved:false,winnerIdx:null,createdAt:new Date().toISOString()};
+    volume:0,liquidity:liq,traders:0,resolved:false,winnerIdx:null,createdAt:new Date().toISOString()};
   S.markets=[m,...S.markets];saveMarkets(S.markets);
   logActivity({type:'market_created',user:S.name,marketId:m.id,desc:`${S.name} created market: "${f.title}" (${f.marketType})`});
   S.creating=false;S.form={title:'',desc:'',cat:'Other',end:'',outcomes:['Yes','No'],marketType:'exclusive'};
@@ -1790,7 +1798,14 @@ function migrateV5(){
   // 3. Reset unresolved market stats (keep questions/outcomes intact)
   const cleaned=S.markets.map(m=>{
     const c=JSON.parse(JSON.stringify(m));
-    if(!c.resolved){c.volume=0;c.traders=0}
+    if(!c.resolved){
+      c.volume=0;c.traders=0;
+      // Reset pool values and prices for clean start
+      const isExcl=(c.marketType||'exclusive')==='exclusive';
+      c.liquidity=isExcl?15:700;
+      const defPrice=isExcl?Math.round(100/c.outcomes.length)/100:0.5;
+      c.outcomes.forEach(o=>{o.pool=0;o.price=defPrice;o.history=[defPrice]});
+    }
     return c;
   });
   S.markets=cleaned;saveMarkets(cleaned);
