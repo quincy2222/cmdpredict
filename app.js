@@ -82,8 +82,8 @@ let S={
   // Guest mode
   isGuest:false,
   notif:null,
-  form:{title:'',desc:'',cat:'Other',end:'',outcomes:['Yes','No']},
-  editForm:{outcomes:[]},
+  form:{title:'',desc:'',cat:'Other',end:'',outcomes:['Yes','No'],marketType:'exclusive'},
+  editForm:{outcomes:[],marketType:'exclusive'},
   ready:false,renderCount:0
 };
 
@@ -196,28 +196,22 @@ function getUserStats(userName){
 }
 
 // ── AMM (LMSR — Logarithmic Market Scoring Rule) ──
-// Prices ALWAYS sum to 100% across outcomes.
-// Each outcome has a weight (q). Price = softmax(q/b).
-// Buying YES on outcome i pushes its price UP and all others DOWN.
-// Buying NO on outcome i pushes its price DOWN and all others UP.
+// For "exclusive" markets: exactly one winner, prices sum to 100%.
+// Uses softmax: price_i = e^(q_i/b) / sum(e^(q_j/b))
 
 function lmsrPrices(outcomes, b){
-  // softmax: price_i = e^(q_i/b) / sum(e^(q_j/b))
   const qs=outcomes.map(o=>o.pool||0);
-  const maxQ=Math.max(...qs); // numerical stability
+  const maxQ=Math.max(...qs);
   const exps=qs.map(q=>Math.exp((q-maxQ)/b));
   const sumExp=exps.reduce((a,v)=>a+v,0);
   return exps.map(e=>Math.max(.01,Math.min(.99,Math.round((e/sumExp)*100)/100)));
 }
 
 function lmsrCost(outcomes, oi, shares, side, b){
-  // Cost of buying `shares` on outcome `oi`
-  // C = b * ln(sum(e^(q_j/b))) — evaluated before and after the move
   const before=outcomes.map(o=>o.pool||0);
   const after=[...before];
   const dir=side==='yes'?1:-1;
   after[oi]+=dir*shares;
-
   function logSumExp(qs){
     const mx=Math.max(...qs);
     return mx+Math.log(qs.reduce((a,q)=>a+Math.exp((q-mx)/b),0));
@@ -225,55 +219,91 @@ function lmsrCost(outcomes, oi, shares, side, b){
   return Math.abs(b*logSumExp(after)-b*logSumExp(before));
 }
 
+// ── Independent Sigmoid AMM ──
+// For "independent" markets: each outcome is its own YES/NO.
+// Prices do NOT sum to 100%. Used for cumulative/threshold markets.
+
+function sigmoidPrice(pool, b){
+  const p=1/(1+Math.exp(-(pool||0)/b));
+  return Math.max(.01,Math.min(.99,Math.round(p*100)/100));
+}
+
+function sigmoidCost(pool, shares, side, b){
+  const dir=side==='yes'?1:-1;
+  const newPool=(pool||0)+dir*shares;
+  const logSumBefore=b*Math.log(1+Math.exp((pool||0)/b));
+  const logSumAfter=b*Math.log(1+Math.exp(newPool/b));
+  return Math.abs(logSumAfter-logSumBefore);
+}
+
+// ── Unified buy/sell that routes based on market type ──
+
+function getB(market){
+  return (market.marketType||'exclusive')==='exclusive'?20:1000;
+}
+
 function cpmmBuy(market, oi, side, amount){
   const m=JSON.parse(JSON.stringify(market));
-  const b=20; // LMSR sensitivity tuned for 5 analysts with $10K each
+  const isExclusive=(m.marketType||'exclusive')==='exclusive';
+  const b=getB(m);
 
-  // Binary search for how many shares `amount` buys
-  let lo=0, hi=amount*20;
+  let lo=0,hi=amount*20;
   for(let iter=0;iter<60;iter++){
     const mid=(lo+hi)/2;
-    const cost=lmsrCost(m.outcomes, oi, mid, side, b);
+    const cost=isExclusive
+      ?lmsrCost(m.outcomes, oi, mid, side, b)
+      :sigmoidCost(m.outcomes[oi].pool||0, mid, side, b);
     if(cost<amount) lo=mid; else hi=mid;
   }
   const shares=Math.round(lo*100)/100;
 
-  // Apply pool change
   const dir=side==='yes'?1:-1;
   m.outcomes[oi].pool=(m.outcomes[oi].pool||0)+dir*shares;
 
-  // Recalculate ALL prices (they always sum to 100%)
-  const prices=lmsrPrices(m.outcomes, b);
-  m.outcomes.forEach((o,i)=>{
-    o.price=prices[i];
-    o.history=[...(o.history||[o.price]),o.price];
-  });
+  if(isExclusive){
+    // Recalculate ALL prices (sum to 100%)
+    const prices=lmsrPrices(m.outcomes, b);
+    m.outcomes.forEach((o,i)=>{
+      o.price=prices[i];
+      o.history=[...(o.history||[o.price]),o.price];
+    });
+  }else{
+    // Only update this outcome's price
+    m.outcomes[oi].price=sigmoidPrice(m.outcomes[oi].pool, b);
+    m.outcomes[oi].history=[...(m.outcomes[oi].history||[m.outcomes[oi].price]),m.outcomes[oi].price];
+  }
 
   m.volume=(m.volume||0)+amount;
   m.traders=(m.traders||0)+1;
-
   const avgPrice=shares>0?Math.round((amount/shares)*100)/100:0;
   return {market:m, shares, avgPrice};
 }
 
 function cpmmSell(market, oi, side, shares){
   const m=JSON.parse(JSON.stringify(market));
-  const b=20; // LMSR sensitivity tuned for 5 analysts with $10K each
+  const isExclusive=(m.marketType||'exclusive')==='exclusive';
+  const b=getB(m);
 
-  // Selling = reversing the pool direction
   const sellSide=side==='yes'?'no':'yes';
-  const saleValue=Math.round(lmsrCost(m.outcomes, oi, shares, sellSide, b)*100)/100;
+  const saleValue=Math.round(
+    (isExclusive
+      ?lmsrCost(m.outcomes, oi, shares, sellSide, b)
+      :sigmoidCost(m.outcomes[oi].pool||0, shares, sellSide, b)
+    )*100)/100;
 
-  // Apply reverse pool change
   const dir=side==='yes'?-1:1;
   m.outcomes[oi].pool=(m.outcomes[oi].pool||0)+dir*shares;
 
-  // Recalculate ALL prices
-  const prices=lmsrPrices(m.outcomes, b);
-  m.outcomes.forEach((o,i)=>{
-    o.price=prices[i];
-    o.history=[...(o.history||[o.price]),o.price];
-  });
+  if(isExclusive){
+    const prices=lmsrPrices(m.outcomes, b);
+    m.outcomes.forEach((o,i)=>{
+      o.price=prices[i];
+      o.history=[...(o.history||[o.price]),o.price];
+    });
+  }else{
+    m.outcomes[oi].price=sigmoidPrice(m.outcomes[oi].pool, b);
+    m.outcomes[oi].history=[...(m.outcomes[oi].history||[m.outcomes[oi].price]),m.outcomes[oi].price];
+  }
 
   m.volume=(m.volume||0)+saleValue;
   return {market:m, saleValue};
@@ -346,13 +376,14 @@ function createMarket(){
   if(!f.title||!f.end){flash("Title and end date required","err");return}
   const labels=f.outcomes.filter(o=>o.trim());
   if(labels.length<2){flash("Need at least 2 outcomes","err");return}
-  const initPrice=Math.round((1/labels.length)*100)/100;
+  const initPrice=f.marketType==='exclusive'?Math.round((1/labels.length)*100)/100:0.5;
   const m={id:Date.now(),title:f.title,description:f.desc||"No resolution criteria specified.",category:f.cat,endDate:f.end,creator:S.name,
+    marketType:f.marketType||'exclusive',
     outcomes:labels.map(l=>({label:l,price:initPrice,pool:0,history:[initPrice]})),
     volume:0,liquidity:1000,traders:0,resolved:false,winnerIdx:null,createdAt:new Date().toISOString()};
   S.markets=[m,...S.markets];saveMarkets(S.markets);
-  logActivity({type:'market_created',user:S.name,marketId:m.id,desc:`${S.name} created market: "${f.title}"`});
-  S.creating=false;S.form={title:'',desc:'',cat:'Other',end:'',outcomes:['Yes','No']};
+  logActivity({type:'market_created',user:S.name,marketId:m.id,desc:`${S.name} created market: "${f.title}" (${f.marketType})`});
+  S.creating=false;S.form={title:'',desc:'',cat:'Other',end:'',outcomes:['Yes','No'],marketType:'exclusive'};
   flash("Market created!");
 }
 
@@ -412,15 +443,23 @@ function saveEdit(){
   if(labels.length<2){flash("Need at least 2 outcomes","err");return}
   const m=S.markets.find(x=>x.id===S.editing.id);if(!m)return;
   const u=JSON.parse(JSON.stringify(m));
-  const b=20; // LMSR sensitivity tuned for 5 analysts with $10K each
+  // Save market type
+  u.marketType=ef.marketType||u.marketType||'exclusive';
+  const isExclusive=u.marketType==='exclusive';
+  const b=getB(u);
+  const defaultPrice=isExclusive?Math.round(100/labels.length)/100:0.5;
   u.outcomes=labels.map(label=>{
     const ex=u.outcomes.find(o=>o.label===label);
     if(ex)return ex;
-    return{label,price:Math.round(100/labels.length)/100,pool:0,history:[Math.round(100/labels.length)/100]};
+    return{label,price:defaultPrice,pool:0,history:[defaultPrice]};
   });
-  // Recalculate all prices to ensure they sum to 100%
-  const prices=lmsrPrices(u.outcomes, b);
-  u.outcomes.forEach((o,i)=>{o.price=prices[i]});
+  // Recalculate prices based on type
+  if(isExclusive){
+    const prices=lmsrPrices(u.outcomes, b);
+    u.outcomes.forEach((o,i)=>{o.price=prices[i]});
+  }else{
+    u.outcomes.forEach(o=>{o.price=sigmoidPrice(o.pool||0, b)});
+  }
   if(ef.title)u.title=ef.title;if(ef.desc)u.description=ef.desc;if(ef.end)u.endDate=ef.end;
   S.markets=S.markets.map(x=>x.id===u.id?u:x);saveMarkets(S.markets);
   S.editing=null;S.sel=u;flash("Market updated!");
@@ -1114,6 +1153,7 @@ function renderMarkets(list,tv,tt,lb){
         <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">
           <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center">
             <span class="pill" style="background:${TL};color:${T}">${CI[m.category]||'🔮'} ${m.category}</span>
+            ${(m.marketType||'exclusive')==='independent'?'<span class="pill" style="background:#FEF3C7;color:#92400E">📊 Independent</span>':''}
             ${m.resolved?`<span class="${m.cancelled?'cancelled-badge':'resolved-badge'}">${m.cancelled?'Cancelled':'Resolved'}</span>`:''}
           </div>
           <div style="font-size:11px;color:var(--tx3)">${new Date(m.endDate).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}</div>
@@ -1427,6 +1467,7 @@ function mountDetail(){
       <div><div style="display:flex;gap:5px;margin-bottom:5px;flex-wrap:wrap">
         <span class="pill" style="background:${TL};color:${T}">${CI[m.category]||'🔮'} ${m.category}</span>
         <span class="pill" style="background:#F0F4FF;color:#6366F1">${m.outcomes.length} contracts</span>
+        ${(m.marketType||'exclusive')==='independent'?'<span class="pill" style="background:#FEF3C7;color:#92400E">📊 Independent</span>':'<span class="pill" style="background:#F0FDF4;color:#166534">🏆 One Winner</span>'}
         ${m.resolved?`<span class="${m.cancelled?'cancelled-badge':'resolved-badge'}">${m.cancelled?'CANCELLED':'RESOLVED'}</span>`:''}</div>
         <h2 style="font-size:16.5px;font-weight:700;line-height:1.4">${m.title}</h2></div>
       <button class="xbtn" id="close-detail">×</button></div>
@@ -1546,7 +1587,7 @@ function mountDetail(){
   document.querySelectorAll('.side-btn').forEach(el=>{el.onclick=e=>{e.stopPropagation();S.side=el.dataset.side;render()}});
   if(tradeBtn)tradeBtn.onclick=trade;
   if(document.getElementById('edit-market-btn'))document.getElementById('edit-market-btn').onclick=()=>{
-    S.editing=S.sel;S.editForm={title:S.sel.title,desc:S.sel.description,end:S.sel.endDate,outcomes:S.sel.outcomes.map(o=>o.label)};render()};
+    S.editing=S.sel;S.editForm={title:S.sel.title,desc:S.sel.description,end:S.sel.endDate,outcomes:S.sel.outcomes.map(o=>o.label),marketType:S.sel.marketType||'exclusive'};render()};
   if(document.getElementById('resolve-market-btn'))document.getElementById('resolve-market-btn').onclick=()=>{S.resolving=S.sel;render()};
 }
 
@@ -1554,10 +1595,21 @@ function mountCreate(){
   const f=S.form;
   let html=`<div class="overlay" id="create-overlay"><div class="modal">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px"><h2 style="font-size:16.5px;font-weight:700">Create a New Market</h2><button class="xbtn" id="close-create">×</button></div>
-    <p style="font-size:12.5px;color:var(--tx2);margin-bottom:16px;line-height:1.5">Prices always sum to 100%. Buying one outcome pushes the others down.</p>
     <div style="display:flex;flex-direction:column;gap:12px">
       <div><label style="font-size:11px;color:var(--tx2);margin-bottom:4px;display:block;font-weight:600">Question *</label><input id="f-title" placeholder="e.g. How many OKR meetings in Q3?" value="${f.title}"></div>
       <div><label style="font-size:11px;color:var(--tx2);margin-bottom:4px;display:block;font-weight:600">Resolution Criteria</label><textarea id="f-desc" rows="2" placeholder="How does this resolve?" style="resize:vertical">${f.desc}</textarea></div>
+      <div><label style="font-size:11px;color:var(--tx2);margin-bottom:6px;display:block;font-weight:600">Market Type</label>
+        <div style="display:flex;gap:6px">
+          <button class="mtype-btn" data-type="exclusive" style="flex:1;padding:10px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:600;border:2px solid ${f.marketType==='exclusive'?T:'var(--bdr)'};background:${f.marketType==='exclusive'?TL:'#F8FAFC'};color:${f.marketType==='exclusive'?T:'var(--tx2)'}">
+            <div>🏆 One Winner</div>
+            <div style="font-weight:400;font-size:10.5px;margin-top:3px;opacity:.7">Prices sum to 100%</div>
+          </button>
+          <button class="mtype-btn" data-type="independent" style="flex:1;padding:10px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:600;border:2px solid ${f.marketType==='independent'?T:'var(--bdr)'};background:${f.marketType==='independent'?TL:'#F8FAFC'};color:${f.marketType==='independent'?T:'var(--tx2)'}">
+            <div>📊 Independent</div>
+            <div style="font-weight:400;font-size:10.5px;margin-top:3px;opacity:.7">Each outcome separate</div>
+          </button>
+        </div>
+      </div>
       <div><label style="font-size:11px;color:var(--tx2);margin-bottom:6px;display:block;font-weight:600">Outcomes *</label>
         <div style="display:flex;flex-direction:column;gap:5px">${f.outcomes.map((o,i)=>`<div style="display:flex;gap:6px;align-items:center"><span class="m" style="font-size:10.5px;color:var(--tx3);min-width:18px">${i+1}.</span><input class="outcome-input" data-idx="${i}" placeholder="Outcome ${i+1}" value="${o}" style="flex:1">${f.outcomes.length>2?`<button class="remove-outcome" data-idx="${i}" style="background:none;border:none;cursor:pointer;color:var(--tx3);font-size:15px;padding:0 3px">×</button>`:''}</div>`).join('')}</div>
         <button id="add-outcome" style="background:none;border:1px dashed #D1D9E6;border-radius:5px;padding:6px;cursor:pointer;font-size:12px;color:var(--tx2);font-family:'Source Sans 3',sans-serif;width:100%;margin-top:5px">+ Add outcome</button></div>
@@ -1573,6 +1625,7 @@ function mountCreate(){
   document.getElementById('f-desc').oninput=e=>{S.form.desc=e.target.value};
   document.getElementById('f-cat').onchange=e=>{S.form.cat=e.target.value};
   document.getElementById('f-end').onchange=e=>{S.form.end=e.target.value};
+  document.querySelectorAll('.mtype-btn').forEach(el=>{el.onclick=()=>{S.form.marketType=el.dataset.type;render()}});
   document.querySelectorAll('.outcome-input').forEach(el=>{el.oninput=e=>{S.form.outcomes[parseInt(el.dataset.idx)]=e.target.value}});
   document.querySelectorAll('.remove-outcome').forEach(el=>{el.onclick=()=>{S.form.outcomes.splice(parseInt(el.dataset.idx),1);render()}});
   document.getElementById('add-outcome').onclick=()=>{S.form.outcomes.push('');render()};
@@ -1581,11 +1634,24 @@ function mountCreate(){
 
 function mountEdit(){
   const ef=S.editForm;
+  const mt=ef.marketType||'exclusive';
   let html=`<div class="overlay" id="edit-overlay"><div class="modal">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px"><h2 style="font-size:16.5px;font-weight:700">Edit Market</h2><button class="xbtn" id="close-edit">×</button></div>
     <div style="display:flex;flex-direction:column;gap:12px">
       <div><label style="font-size:11px;color:var(--tx2);margin-bottom:4px;display:block;font-weight:600">Question</label><input id="ef-title" value="${ef.title}"></div>
       <div><label style="font-size:11px;color:var(--tx2);margin-bottom:4px;display:block;font-weight:600">Description</label><textarea id="ef-desc" rows="2" style="resize:vertical">${ef.desc}</textarea></div>
+      <div><label style="font-size:11px;color:var(--tx2);margin-bottom:6px;display:block;font-weight:600">Market Type</label>
+        <div style="display:flex;gap:6px">
+          <button class="emtype-btn" data-type="exclusive" style="flex:1;padding:10px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:600;border:2px solid ${mt==='exclusive'?T:'var(--bdr)'};background:${mt==='exclusive'?TL:'#F8FAFC'};color:${mt==='exclusive'?T:'var(--tx2)'}">
+            <div>🏆 One Winner</div>
+            <div style="font-weight:400;font-size:10.5px;margin-top:3px;opacity:.7">Prices sum to 100%</div>
+          </button>
+          <button class="emtype-btn" data-type="independent" style="flex:1;padding:10px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:600;border:2px solid ${mt==='independent'?T:'var(--bdr)'};background:${mt==='independent'?TL:'#F8FAFC'};color:${mt==='independent'?T:'var(--tx2)'}">
+            <div>📊 Independent</div>
+            <div style="font-weight:400;font-size:10.5px;margin-top:3px;opacity:.7">Each outcome separate</div>
+          </button>
+        </div>
+      </div>
       <div><label style="font-size:11px;color:var(--tx2);margin-bottom:6px;display:block;font-weight:600">Outcomes</label>
         <div style="display:flex;flex-direction:column;gap:5px">${ef.outcomes.map((o,i)=>`<div style="display:flex;gap:6px;align-items:center"><span class="m" style="font-size:10.5px;color:var(--tx3);min-width:18px">${i+1}.</span><input class="edit-outcome" data-idx="${i}" value="${o}" style="flex:1">${ef.outcomes.length>2?`<button class="rm-edit-oc" data-idx="${i}" style="background:none;border:none;cursor:pointer;color:var(--tx3);font-size:15px;padding:0 3px">×</button>`:''}</div>`).join('')}</div>
         <button id="add-edit-oc" style="background:none;border:1px dashed #D1D9E6;border-radius:5px;padding:6px;cursor:pointer;font-size:12px;color:var(--tx2);font-family:'Source Sans 3',sans-serif;width:100%;margin-top:5px">+ Add outcome</button></div>
@@ -1598,6 +1664,7 @@ function mountEdit(){
   document.getElementById('ef-title').oninput=e=>{S.editForm.title=e.target.value};
   document.getElementById('ef-desc').oninput=e=>{S.editForm.desc=e.target.value};
   document.getElementById('ef-end').onchange=e=>{S.editForm.end=e.target.value};
+  document.querySelectorAll('.emtype-btn').forEach(el=>{el.onclick=()=>{S.editForm.marketType=el.dataset.type;render()}});
   document.querySelectorAll('.edit-outcome').forEach(el=>{el.oninput=e=>{S.editForm.outcomes[parseInt(el.dataset.idx)]=e.target.value}});
   document.querySelectorAll('.rm-edit-oc').forEach(el=>{el.onclick=()=>{S.editForm.outcomes.splice(parseInt(el.dataset.idx),1);render()}});
   document.getElementById('add-edit-oc').onclick=()=>{S.editForm.outcomes.push('');render()};
