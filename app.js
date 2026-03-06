@@ -120,33 +120,56 @@ async function init(){
   const rp=localStorage.getItem('cmdp_portfolio');if(rp)S.portfolio=JSON.parse(rp);
   S.ready=true;render();
 
-  // One-time pool rescaling: old b=1500 pools → new b=50 LMSR
-  // Only runs once per browser, flagged in localStorage
+  // Recalculate pools from trade history using LMSR
+  // Runs on every load to ensure pools match the current engine
+  // This is safe because replaying trades is idempotent
   setTimeout(()=>{
-    if(localStorage.getItem('cmdp_v5_pools_scaled'))return;
-    const OLD_B=1500, NEW_B=50, ratio=NEW_B/OLD_B;
+    if(!S.trades.length||!S.markets.length)return;
+
     let changed=false;
     S.markets.forEach(m=>{
       if(m.resolved)return;
-      if((m.marketType||'exclusive')==='exclusive'){
-        // Rescale pool values for LMSR
-        m.outcomes.forEach(o=>{
-          if(o.pool&&o.pool!==0){
-            o.pool=o.pool*ratio;
-            changed=true;
-          }
-        });
-        // Recalculate prices
-        const prices=lmsrPrices(m.outcomes, NEW_B);
-        m.outcomes.forEach((o,i)=>{o.price=prices[i]});
-      }
+      const isExcl=(m.marketType||'exclusive')==='exclusive';
+      if(!isExcl)return; // Only recalc exclusive/LMSR markets
+
+      // Save old prices to detect if anything changed
+      const oldPrices=m.outcomes.map(o=>o.price);
+
+      // Reset pools to 0
+      m.outcomes.forEach(o=>{o.pool=0});
+
+      // Replay each trade on this market using LMSR
+      const mTrades=S.trades.filter(t=>t.mid===m.id&&!t.isSell).sort((a,b)=>a.ts-b.ts);
+      const b=50;
+      mTrades.forEach(t=>{
+        let lo=0,hi=(t.amount||0)*20;
+        for(let iter=0;iter<60;iter++){
+          const mid2=(lo+hi)/2;
+          const before=m.outcomes.map(o=>o.pool||0);
+          const after=[...before];
+          const dir=t.side==='yes'?1:-1;
+          after[t.outcomeIdx]+=dir*mid2;
+          function logSumExp(qs){const mx=Math.max(...qs);return mx+Math.log(qs.reduce((a2,q)=>a2+Math.exp((q-mx)/b),0))}
+          const cost=Math.abs(b*logSumExp(after)-b*logSumExp(before));
+          if(cost<t.amount) lo=mid2; else hi=mid2;
+        }
+        const dir=t.side==='yes'?1:-1;
+        m.outcomes[t.outcomeIdx].pool=(m.outcomes[t.outcomeIdx].pool||0)+dir*lo;
+      });
+
+      // Recalculate prices
+      const prices=lmsrPrices(m.outcomes, b);
+      m.outcomes.forEach((o,i)=>{o.price=prices[i]});
+
+      // Only save if prices actually changed
+      if(prices.some((p,i)=>p!==oldPrices[i]))changed=true;
     });
+
     if(changed){
       saveMarkets(S.markets);
-      console.log('v5: rescaled pools from b=1500 to b=50');
+      render();
     }
-    localStorage.setItem('cmdp_v5_pools_scaled','1');
-  },1500);
+  },2000);
 }
 
 function saveMarkets(m){if(useFirebase){const o={};m.forEach(x=>{o[x.id]=x});db.ref('markets').set(o)}else localStorage.setItem('cmdp_markets',JSON.stringify(m))}
