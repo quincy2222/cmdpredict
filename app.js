@@ -212,6 +212,23 @@ function initActivityLog(){
 }
 
 // ── Get user stats from trades ──
+// Helper: calculate dollar-weighted payout for a specific trade on a resolved market
+function calcDollarPayout(trade, market){
+  if(!market.resolved||market.cancelled)return 0;
+  const pool=getMarketPool(market);
+  const winnerIdx=market.winnerIdx;
+  // Collect all winning dollars
+  let totalWinDollars=0;
+  S.trades.filter(t=>t.mid===market.id&&!t.isSell&&t.amount>0).forEach(t=>{
+    const won=(t.side==='yes'&&t.outcomeIdx===winnerIdx)||(t.side==='no'&&t.outcomeIdx!==winnerIdx);
+    if(won)totalWinDollars+=t.amount;
+  });
+  if(totalWinDollars===0)return 0;
+  const won=(trade.side==='yes'&&trade.outcomeIdx===winnerIdx)||(trade.side==='no'&&trade.outcomeIdx!==winnerIdx);
+  if(!won)return 0;
+  return (trade.amount/totalWinDollars)*pool.total;
+}
+
 function getUserStats(userName){
   const canonical=canonicalName(userName);
   const userTrades=S.trades.filter(t=>canonicalName(t.who)===canonical);
@@ -221,25 +238,28 @@ function getUserStats(userName){
   userTrades.forEach(t=>{
     totalVolume+=(t.amount||0);
     const mk=S.markets.find(m=>m.id===t.mid);
-    let cur=t.avg,pnl=0,status='open';
-    if(mk&&mk.outcomes[t.outcomeIdx]){
+    let pnl=0,status='open';
+    if(mk){
       if(mk.resolved){
         const won=(t.side==='yes'&&t.outcomeIdx===mk.winnerIdx)||(t.side==='no'&&t.outcomeIdx!==mk.winnerIdx);
         if(mk.cancelled){
           pnl=0;status='cancelled';
         }else if(won){
-          pnl=t.shares-t.amount;wins++;status='won';
+          const payout=calcDollarPayout(t,mk);
+          pnl=payout-(t.amount||0);wins++;status='won';
         }else{
-          pnl=-t.amount;losses++;status='lost';
+          pnl=-(t.amount||0);losses++;status='lost';
         }
       }else{
-        cur=t.side==='yes'?mk.outcomes[t.outcomeIdx].price:(1-mk.outcomes[t.outcomeIdx].price);
-        pnl=(cur-t.avg)*t.shares;
+        // Open positions: estimate P&L from current price
+        const price=mk.outcomes[t.outcomeIdx]?
+          (t.side==='yes'?mk.outcomes[t.outcomeIdx].price:(1-mk.outcomes[t.outcomeIdx].price)):0;
+        pnl=t.amount>0?(price-0.5)*t.amount*2:0; // rough estimate
         status='open';
       }
     }
     totalPnl+=pnl;
-    tradeDetails.push({...t,currentPrice:cur,pnl,status,marketTitle:t.title||mk?.title||'Unknown'});
+    tradeDetails.push({...t,pnl,status,marketTitle:t.title||mk?.title||'Unknown'});
   });
 
   tradeDetails.sort((a,b)=>b.ts-a.ts);
@@ -524,10 +544,10 @@ function saveEdit(){
   S.editing=null;S.sel=u;flash("Market updated!");
 }
 
-// ── RESOLVE WITH ZERO-SUM POOL PAYOUT ──
-// Instead of paying $1/share (which creates money), we distribute
-// the actual pool of money that was bet. Winners split the pot
-// proportional to their winning shares. Total out = total in.
+// ── RESOLVE WITH ZERO-SUM DOLLAR-WEIGHTED PAYOUT ──
+// The AMM handles price discovery, but payouts are based on
+// DOLLARS wagered, not shares held. This prevents slippage
+// from warping who gets paid. Total out = total in.
 function resolveMarket(winnerIdx){
   const m=S.markets.find(x=>x.id===S.resolving.id);if(!m)return;
   const u=JSON.parse(JSON.stringify(m));
@@ -539,24 +559,24 @@ function resolveMarket(winnerIdx){
   const pool=getMarketPool(u);
   const totalPool=pool.total;
 
-  // Calculate winning shares per user
-  const winnerShares={};
-  let totalWinnerShares=0;
+  // Calculate winning DOLLARS per user (not shares!)
+  const winnerDollars={};
+  let totalWinnerDollars=0;
   S.trades.forEach(t=>{
     if(t.mid!==u.id||t.isSell)return;
     const won=(t.side==='yes'&&t.outcomeIdx===winnerIdx)||(t.side==='no'&&t.outcomeIdx!==winnerIdx);
-    if(won){
-      if(!winnerShares[t.who])winnerShares[t.who]=0;
-      winnerShares[t.who]+=t.shares;
-      totalWinnerShares+=t.shares;
+    if(won&&t.amount>0){
+      if(!winnerDollars[t.who])winnerDollars[t.who]=0;
+      winnerDollars[t.who]+=t.amount;
+      totalWinnerDollars+=t.amount;
     }
   });
 
-  // Distribute the pool proportionally to winning shares
+  // Distribute the pool proportionally to dollars wagered on winning side
   const payoutsByUser={};
-  if(totalWinnerShares>0){
-    Object.entries(winnerShares).forEach(([who,shares])=>{
-      payoutsByUser[who]=(shares/totalWinnerShares)*totalPool;
+  if(totalWinnerDollars>0){
+    Object.entries(winnerDollars).forEach(([who,dollars])=>{
+      payoutsByUser[who]=(dollars/totalWinnerDollars)*totalPool;
     });
   }
 
@@ -821,17 +841,19 @@ function getLeagueTable(){
     const ut=S.trades.filter(t=>canonicalName(t.who)===name);
     let vol=0,w=0,l=0,openValue=0;
     ut.forEach(t=>{
-      if(t.isSell)return; // skip sell records
+      if(t.isSell)return;
       vol+=Math.abs(t.amount||0);
       const mk=S.markets.find(m=>m.id===t.mid);
-      if(mk&&mk.outcomes[t.outcomeIdx]){
+      if(mk){
         if(mk.resolved&&!mk.cancelled){
           const won=(t.side==='yes'&&t.outcomeIdx===mk.winnerIdx)||(t.side==='no'&&t.outcomeIdx!==mk.winnerIdx);
           if(won)w++;else l++;
-        }else if(!mk.resolved){
-          // Value open positions at current market price
+        }else if(!mk.resolved&&mk.outcomes[t.outcomeIdx]){
+          // Estimate open value from current price and dollar amount
           const curPrice=t.side==='yes'?mk.outcomes[t.outcomeIdx].price:(1-mk.outcomes[t.outcomeIdx].price);
-          openValue+=curPrice*t.shares;
+          // If price is above entry (rough 1/n), position is in profit
+          const entryPrice=1/mk.outcomes.length;
+          openValue+=(curPrice-entryPrice)*(t.amount||0)*2;
         }
       }
     });
@@ -976,15 +998,20 @@ function getLeaderboard(){
     if(!map[who])map[who]={name:who,trades:0,volume:0,pnl:0};
     map[who].trades++;map[who].volume+=Math.abs(t.amount||0);
     const mk=S.markets.find(m=>m.id===t.mid);
-    if(mk&&mk.outcomes[t.outcomeIdx]){
-      if(mk.resolved){
+    if(mk){
+      if(mk.resolved&&!mk.cancelled){
         const won=(t.side==='yes'&&t.outcomeIdx===mk.winnerIdx)||(t.side==='no'&&t.outcomeIdx!==mk.winnerIdx);
-        if(mk.cancelled){/* no pnl */}
-        else if(won)map[who].pnl+=(t.shares-t.amount);
-        else map[who].pnl+=(-t.amount);
-      }else{
-        const cur=t.side==='yes'?mk.outcomes[t.outcomeIdx].price:(1-mk.outcomes[t.outcomeIdx].price);
-        map[who].pnl+=(cur-t.avg)*t.shares;
+        if(won){
+          const payout=calcDollarPayout(t,mk);
+          map[who].pnl+=(payout-(t.amount||0));
+        }else{
+          map[who].pnl+=-(t.amount||0);
+        }
+      }else if(!mk.resolved){
+        // Open: rough estimate from current price
+        const price=mk.outcomes[t.outcomeIdx]?
+          (t.side==='yes'?mk.outcomes[t.outcomeIdx].price:(1-mk.outcomes[t.outcomeIdx].price)):0.5;
+        map[who].pnl+=(t.amount>0?(price-0.5)*t.amount*2:0);
       }
     }
   });
@@ -1599,9 +1626,39 @@ function mountDetail(){
     const a=parseFloat(amtInput?.value||'0');
     S.amt=amtInput?.value||'';
     if(a>0&&m.outcomes[s.selOc]){
+      // Calculate what the pool payout would be (dollar-weighted)
+      const pool=getMarketPool(m);
+      const isYes=s.side==='yes';
+      // Your dollars joining the winning side
+      let yourWinDollars=a;
+      let totalWinDollars=a; // start with your bet
+      let totalPool=pool.total+a;
+
+      // Add existing winning bets
+      S.trades.filter(t=>t.mid===m.id&&!t.isSell).forEach(t=>{
+        const wouldWin=isYes?(t.side==='yes'&&t.outcomeIdx===s.selOc):(t.side==='no'&&t.outcomeIdx===s.selOc)||(t.side==='yes'&&t.outcomeIdx!==s.selOc);
+        // Simplified: for YES bet on outcome X, you win if X wins
+        const tWins=(t.side==='yes'&&t.outcomeIdx===s.selOc)||(t.side==='no'&&t.outcomeIdx!==s.selOc);
+        if(isYes&&tWins&&t.amount>0) totalWinDollars+=t.amount;
+        if(!isYes){
+          // NO bet on X wins if X loses — so all other outcomes winning
+          const tWinsNo=(t.side==='no'&&t.outcomeIdx===s.selOc)||(t.side==='yes'&&t.outcomeIdx!==s.selOc);
+          if(tWinsNo&&t.amount>0) totalWinDollars+=t.amount;
+        }
+      });
+
+      const payout=totalWinDollars>0?(yourWinDollars/totalWinDollars)*totalPool:a;
+      const profit=payout-a;
+      const mult=a>0?payout/a:0;
+
+      // Also show price impact
       const est=cpmmBuy(JSON.parse(JSON.stringify(m)),s.selOc,s.side,a);
-      const sh=est.shares.toFixed(1),ap=Math.round(est.avgPrice*100);
-      if(preview)preview.innerHTML=`<div style="display:flex;justify-content:space-between"><span>${sh} shares @ avg ${ap}¢</span><span style="color:${GN};font-weight:600">Payout if wins: $${est.shares.toFixed(0)}</span></div>`;
+      const newPrice=Math.round(est.market.outcomes[s.selOc].price*100);
+
+      if(preview)preview.innerHTML=`<div style="display:flex;flex-direction:column;gap:3px">
+        <div style="display:flex;justify-content:space-between"><span>If wins: <strong style="color:${GN}">$${payout.toFixed(0)}</strong> (${mult.toFixed(1)}x)</span><span style="color:${profit>=0?GN:RD}">${profit>=0?'+':''}$${profit.toFixed(0)} profit</span></div>
+        <div style="font-size:10.5px;color:var(--tx3)">Price after trade: ${newPrice}¢ · Payouts based on $ wagered, not shares</div>
+      </div>`;
       if(tradeBtn)tradeBtn.textContent=`Buy ${s.side.toUpperCase()} · $${S.amt}`;
     }else{
       if(preview)preview.innerHTML='';
