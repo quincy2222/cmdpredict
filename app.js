@@ -119,6 +119,34 @@ async function init(){
   }
   const rp=localStorage.getItem('cmdp_portfolio');if(rp)S.portfolio=JSON.parse(rp);
   S.ready=true;render();
+
+  // One-time pool rescaling: old b=1500 pools → new b=50 LMSR
+  // Only runs once per browser, flagged in localStorage
+  setTimeout(()=>{
+    if(localStorage.getItem('cmdp_v5_pools_scaled'))return;
+    const OLD_B=1500, NEW_B=50, ratio=NEW_B/OLD_B;
+    let changed=false;
+    S.markets.forEach(m=>{
+      if(m.resolved)return;
+      if((m.marketType||'exclusive')==='exclusive'){
+        // Rescale pool values for LMSR
+        m.outcomes.forEach(o=>{
+          if(o.pool&&o.pool!==0){
+            o.pool=o.pool*ratio;
+            changed=true;
+          }
+        });
+        // Recalculate prices
+        const prices=lmsrPrices(m.outcomes, NEW_B);
+        m.outcomes.forEach((o,i)=>{o.price=prices[i]});
+      }
+    });
+    if(changed){
+      saveMarkets(S.markets);
+      console.log('v5: rescaled pools from b=1500 to b=50');
+    }
+    localStorage.setItem('cmdp_v5_pools_scaled','1');
+  },1500);
 }
 
 function saveMarkets(m){if(useFirebase){const o={};m.forEach(x=>{o[x.id]=x});db.ref('markets').set(o)}else localStorage.setItem('cmdp_markets',JSON.stringify(m))}
