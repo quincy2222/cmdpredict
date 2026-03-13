@@ -1587,17 +1587,22 @@ function mountDetail(){
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:16px">
       ${[{l:'Volume',v:m.volume?'$'+(m.volume/1000).toFixed(1)+'K':'$0'},{l:'Pool',v:'$'+getMarketPool(m).total.toFixed(0)},{l:'Trades',v:m.traders||0},{l:'Ends',v:new Date(m.endDate).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}].map(x=>`<div style="text-align:center"><div style="font-size:9px;color:var(--tx3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:2px">${x.l}</div><div class="m" style="font-size:12px;font-weight:600;color:#334155">${x.v}</div></div>`).join('')}
     </div>
-    ${m.resolved||S.isGuest?'':`<div style="background:#F8FAFC;border-radius:8px;padding:16px;border:1px solid var(--bdr)">
+    ${(()=>{
+      const isExcl=(m.marketType||'exclusive')==='exclusive';
+      const isBinary=m.outcomes.length===2;
+      const showNoBtn=!isExcl||isBinary; // NO only for binary exclusive or any independent
+      const curPrice=m.outcomes[s.selOc]?.price||.5;
+      return m.resolved||S.isGuest?'':`<div style="background:#F8FAFC;border-radius:8px;padding:16px;border:1px solid var(--bdr)">
       <div style="font-size:12px;font-weight:600;color:#334155;margin-bottom:10px">Trading: <span style="color:${T}">${m.outcomes[s.selOc]?.label||''}</span></div>
-      <div style="display:flex;margin-bottom:10px;background:#EEF2F7;border-radius:5px;padding:2px">
-        <button class="side-btn" data-side="yes" style="flex:1;padding:7px;border:none;border-radius:4px;cursor:pointer;font-family:'Source Sans 3',sans-serif;font-weight:600;font-size:12.5px;background:${s.side==='yes'?GN:'transparent'};color:${s.side==='yes'?'#fff':'var(--tx3)'}">Buy YES ${Math.round((m.outcomes[s.selOc]?.price||.5)*100)}¢</button>
-        <button class="side-btn" data-side="no" style="flex:1;padding:7px;border:none;border-radius:4px;cursor:pointer;font-family:'Source Sans 3',sans-serif;font-weight:600;font-size:12.5px;background:${s.side==='no'?RD:'transparent'};color:${s.side==='no'?'#fff':'var(--tx3)'}">Buy NO ${Math.round((1-(m.outcomes[s.selOc]?.price||.5))*100)}¢</button>
-      </div>
+      ${showNoBtn?`<div style="display:flex;margin-bottom:10px;background:#EEF2F7;border-radius:5px;padding:2px">
+        <button class="side-btn" data-side="yes" style="flex:1;padding:7px;border:none;border-radius:4px;cursor:pointer;font-family:'Source Sans 3',sans-serif;font-weight:600;font-size:12.5px;background:${s.side==='yes'?GN:'transparent'};color:${s.side==='yes'?'#fff':'var(--tx3)'}">Buy YES ${Math.round(curPrice*100)}¢</button>
+        <button class="side-btn" data-side="no" style="flex:1;padding:7px;border:none;border-radius:4px;cursor:pointer;font-family:'Source Sans 3',sans-serif;font-weight:600;font-size:12.5px;background:${s.side==='no'?RD:'transparent'};color:${s.side==='no'?'#fff':'var(--tx3)'}">Buy NO ${Math.round((1-curPrice)*100)}¢</button>
+      </div>`:`<div style="font-size:11px;color:var(--tx3);margin-bottom:10px;padding:8px;background:#F0F4FF;border-radius:6px">🏆 One-winner market — pick the outcome you think will win. Current: ${Math.round(curPrice*100)}¢</div>`}
       <input type="number" id="trade-amount" placeholder="Amount ($)" value="${s.amt}" style="margin-bottom:6px">
       <div id="trade-preview" style="font-size:12px;color:var(--tx2);margin-bottom:6px"></div>
-      <button class="btn" id="trade-btn" style="width:100%;padding:10px;font-size:13.5px;background:${s.side==='yes'?GN:RD};color:#fff">Buy ${s.side.toUpperCase()}</button>
+      <button class="btn" id="trade-btn" style="width:100%;padding:10px;font-size:13.5px;background:${s.side==='yes'||!showNoBtn?GN:RD};color:#fff">${showNoBtn?'Buy '+s.side.toUpperCase():'Bet on this outcome'}</button>
       <div style="font-size:10px;color:var(--tx3);text-align:center;margin-top:6px">Balance: $${s.portfolio.balance.toLocaleString()}</div>
-    </div>`}
+    </div>`})()}
 
     ${marketTrades.length>0?`
       <div style="margin-top:16px">
@@ -1625,44 +1630,58 @@ function mountDetail(){
   function updatePreview(){
     const a=parseFloat(amtInput?.value||'0');
     S.amt=amtInput?.value||'';
-    if(a>0&&m.outcomes[s.selOc]){
-      // Calculate what the pool payout would be (dollar-weighted)
-      const pool=getMarketPool(m);
-      const isYes=s.side==='yes';
-      // Your dollars joining the winning side
-      let yourWinDollars=a;
-      let totalWinDollars=a; // start with your bet
-      let totalPool=pool.total+a;
+    const isExcl=(m.marketType||'exclusive')==='exclusive';
+    const isBinary=m.outcomes.length===2;
+    const noAllowed=!isExcl||isBinary;
 
-      // Add existing winning bets
-      S.trades.filter(t=>t.mid===m.id&&!t.isSell).forEach(t=>{
-        const wouldWin=isYes?(t.side==='yes'&&t.outcomeIdx===s.selOc):(t.side==='no'&&t.outcomeIdx===s.selOc)||(t.side==='yes'&&t.outcomeIdx!==s.selOc);
-        // Simplified: for YES bet on outcome X, you win if X wins
-        const tWins=(t.side==='yes'&&t.outcomeIdx===s.selOc)||(t.side==='no'&&t.outcomeIdx!==s.selOc);
-        if(isYes&&tWins&&t.amount>0) totalWinDollars+=t.amount;
-        if(!isYes){
-          // NO bet on X wins if X loses — so all other outcomes winning
-          const tWinsNo=(t.side==='no'&&t.outcomeIdx===s.selOc)||(t.side==='yes'&&t.outcomeIdx!==s.selOc);
-          if(tWinsNo&&t.amount>0) totalWinDollars+=t.amount;
+    // Force YES for exclusive multi-outcome
+    if(isExcl&&!isBinary) S.side='yes';
+
+    if(a>0&&m.outcomes[s.selOc]){
+      const pool=getMarketPool(m);
+      const totalPool=pool.total+a;
+      const side=S.side;
+
+      // Figure out which existing trades would be co-winners with this bet
+      let totalWinDollars=a;
+      S.trades.filter(t=>t.mid===m.id&&!t.isSell&&t.amount>0).forEach(t=>{
+        // For each possible winning outcome, does this trade win?
+        // If I'm betting YES on selOc: I win if selOc wins
+        // If I'm betting NO on selOc: I win if any OTHER outcome wins
+        if(side==='yes'){
+          // Co-winners: other YES on same outcome, or NO on different outcome
+          const tWins=(t.side==='yes'&&t.outcomeIdx===s.selOc)||(t.side==='no'&&t.outcomeIdx!==s.selOc);
+          if(tWins) totalWinDollars+=t.amount;
+        }else{
+          // NO on selOc: I win if selOc loses
+          // Co-winners: other NO on same outcome, or YES on different outcome
+          const tWins=(t.side==='no'&&t.outcomeIdx===s.selOc)||(t.side==='yes'&&t.outcomeIdx!==s.selOc);
+          if(tWins) totalWinDollars+=t.amount;
         }
       });
 
-      const payout=totalWinDollars>0?(yourWinDollars/totalWinDollars)*totalPool:a;
+      const payout=totalWinDollars>0?(a/totalWinDollars)*totalPool:a;
       const profit=payout-a;
       const mult=a>0?payout/a:0;
 
-      // Also show price impact
+      // Price impact
       const est=cpmmBuy(JSON.parse(JSON.stringify(m)),s.selOc,s.side,a);
       const newPrice=Math.round(est.market.outcomes[s.selOc].price*100);
 
       if(preview)preview.innerHTML=`<div style="display:flex;flex-direction:column;gap:3px">
         <div style="display:flex;justify-content:space-between"><span>If wins: <strong style="color:${GN}">$${payout.toFixed(0)}</strong> (${mult.toFixed(1)}x)</span><span style="color:${profit>=0?GN:RD}">${profit>=0?'+':''}$${profit.toFixed(0)} profit</span></div>
-        <div style="font-size:10.5px;color:var(--tx3)">Price after trade: ${newPrice}¢ · Payouts based on $ wagered, not shares</div>
+        <div style="font-size:10.5px;color:var(--tx3)">Price moves to ${newPrice}¢ · Payouts based on $ wagered</div>
       </div>`;
-      if(tradeBtn)tradeBtn.textContent=`Buy ${s.side.toUpperCase()} · $${S.amt}`;
+      if(tradeBtn){
+        if(noAllowed) tradeBtn.textContent=`Buy ${s.side.toUpperCase()} · $${S.amt}`;
+        else tradeBtn.textContent=`Bet $${S.amt} on ${m.outcomes[s.selOc]?.label||'this'}`;
+      }
     }else{
       if(preview)preview.innerHTML='';
-      if(tradeBtn)tradeBtn.textContent=`Buy ${s.side.toUpperCase()}`;
+      if(tradeBtn){
+        if(noAllowed) tradeBtn.textContent=`Buy ${s.side.toUpperCase()}`;
+        else tradeBtn.textContent='Place bet';
+      }
     }
   }
   if(amtInput){amtInput.addEventListener('input',updatePreview);updatePreview()}
