@@ -611,6 +611,90 @@ function resolveMarket(winnerIdx){
   flash(`Resolved! Pool $${totalPool.toFixed(0)} distributed. ${payoutSummary||'No winners.'}`);
 }
 
+// ── RESOLVE A SINGLE OUTCOME (independent markets only) ──
+// Each outcome is its own mini-market. YES bettors win if resolved YES,
+// NO bettors win if resolved NO. Pool = all bets on this outcome (both sides).
+function resolveIndependentOutcome(outcomeIdx, resolvedYes){
+  const m=S.markets.find(x=>x.id===S.resolving.id);if(!m)return;
+  const u=JSON.parse(JSON.stringify(m));
+  const oc=u.outcomes[outcomeIdx];
+  if(!oc||oc.resolved)return;
+
+  // Mark this outcome as resolved
+  oc.resolved=true;
+  oc.resolvedYes=resolvedYes;
+  oc.price=resolvedYes?1:0;
+  oc.history=[...(oc.history||[]),oc.price];
+  oc.resolvedAt=new Date().toISOString();
+  oc.resolvedBy=S.name;
+
+  // Check if ALL outcomes are now resolved → mark whole market resolved
+  const allResolved=u.outcomes.every(o=>o.resolved);
+  if(allResolved){
+    u.resolved=true;
+    u.resolvedAt=new Date().toISOString();
+    u.resolvedBy=S.name;
+  }
+
+  S.markets=S.markets.map(x=>x.id===u.id?u:x);saveMarkets(S.markets);
+
+  // Calculate payout for this outcome's mini-pool
+  // Collect all trades on this specific outcome
+  const ocTrades=S.trades.filter(t=>t.mid===u.id&&t.outcomeIdx===outcomeIdx&&!t.isSell&&t.amount>0);
+  let miniPool=0;
+  ocTrades.forEach(t=>{miniPool+=t.amount});
+
+  // Winners: YES bettors if resolvedYes, NO bettors if !resolvedYes
+  const winningSide=resolvedYes?'yes':'no';
+  let totalWinDollars=0;
+  const winnerDollars={};
+  ocTrades.forEach(t=>{
+    if(t.side===winningSide){
+      if(!winnerDollars[t.who])winnerDollars[t.who]=0;
+      winnerDollars[t.who]+=t.amount;
+      totalWinDollars+=t.amount;
+    }
+  });
+
+  // Distribute this outcome's pool to winners
+  const payoutsByUser={};
+  if(totalWinDollars>0){
+    Object.entries(winnerDollars).forEach(([who,dollars])=>{
+      payoutsByUser[who]=(dollars/totalWinDollars)*miniPool;
+    });
+  }
+
+  Object.entries(payoutsByUser).forEach(([who,amt])=>{
+    if(amt<=0)return;
+    const rounded=Math.round(amt*100)/100;
+    const key=encodeKey(who);
+    if(useFirebase){
+      db.ref('users/'+key).once('value',snap=>{
+        const userData=snap.val()||{name:who,balance:START_BAL};
+        userData.balance=Math.round((userData.balance+rounded)*100)/100;
+        db.ref('users/'+key).set(userData);
+      });
+    }else{
+      const userData=S.users[key]||{name:who,balance:START_BAL};
+      userData.balance=Math.round((userData.balance+rounded)*100)/100;
+      S.users[key]=userData;
+      localStorage.setItem('cmdp_users',JSON.stringify(S.users));
+    }
+    if(who.toLowerCase()===S.name.toLowerCase()){
+      S.portfolio.balance=Math.round((S.portfolio.balance+rounded)*100)/100;
+      savePortfolio();
+    }
+  });
+
+  logActivity({type:'resolve',user:S.name,marketId:u.id,winner:oc.label+' → '+(resolvedYes?'YES':'NO'),
+    desc:`${S.name} resolved "${oc.label}" as ${resolvedYes?'YES':'NO'} in "${u.title}" (pool: $${miniPool.toFixed(0)})`});
+
+  // Keep resolve modal open so you can resolve more outcomes
+  S.resolving=u;S.sel=u;
+  const payoutSummary=Object.entries(payoutsByUser).filter(([,a])=>a>0).map(([who,amt])=>`${who}: +$${Math.round(amt)}`).join(', ');
+  flash(`"${oc.label}" → ${resolvedYes?'YES':'NO'}! Pool $${miniPool.toFixed(0)} distributed. ${payoutSummary||'No winners on this outcome.'}`);
+}
+
 function cancelMarket(){
   const m=S.markets.find(x=>x.id===S.resolving.id);if(!m)return;
   const u=JSON.parse(JSON.stringify(m));
@@ -1566,16 +1650,25 @@ function mountDetail(){
         const hasChart=o.history&&o.history.length>1;
         const isBinary=m.outcomes.length===2;
         const showByDefault=isBinary;
+        const isIndep=(m.marketType||'exclusive')==='independent';
+        const ocResolved=isIndep&&o.resolved;
+        const ocWon=isIndep&&o.resolvedYes;
+        const isWinner=w||(ocResolved&&ocWon);
+        const isLoser=ocResolved&&!ocWon;
+        const rowBg=isWinner?'#F0FDF4':isLoser?'#FEF2F2':active?'var(--tll)':'#F8FAFC';
+        const rowBorder=active&&!m.resolved&&!ocResolved?T:'transparent';
+        const canClick=!m.resolved&&!ocResolved;
         return`<div>
-          <div class="outcome-row" data-idx="${j}" style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;cursor:pointer;border:2px solid ${active&&!m.resolved?T:'transparent'};background:${w?'#F0FDF4':active?'var(--tll)':'#F8FAFC'}">
+          <div class="outcome-row" data-idx="${j}" style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;cursor:${canClick?'pointer':'default'};border:2px solid ${rowBorder};background:${rowBg};${ocResolved?'opacity:.7':''}">
           <div style="flex:1;min-width:0">
-            <div style="display:flex;align-items:center;gap:8px;font-size:13.5px;font-weight:600;color:${w?GN:'var(--tx)'}">
-              ${w?'✓ ':''}${o.label}
-              ${hasChart?`<button class="chart-toggle" data-oc="${j}" style="display:inline-flex;align-items:center;gap:4px;background:${showByDefault?'var(--tl)':'#F1F5F9'};border:1px solid ${showByDefault?T:'var(--bdr)'};border-radius:6px;padding:3px 8px;font-size:10.5px;color:${showByDefault?T:'var(--tx3)'};cursor:pointer;font-family:inherit;transition:all .12s;font-weight:500"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M1 9L4 5L7 7L11 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Chart</button>`:''}
+            <div style="display:flex;align-items:center;gap:8px;font-size:13.5px;font-weight:600;color:${isWinner?GN:isLoser?RD:'var(--tx)'}">
+              ${isWinner?'✓ ':''}${isLoser?'✗ ':''}${o.label}
+              ${ocResolved?`<span style="font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px;background:${ocWon?GN:RD};color:#fff">${ocWon?'YES':'NO'}</span>`:''}
+              ${hasChart&&!ocResolved?`<button class="chart-toggle" data-oc="${j}" style="display:inline-flex;align-items:center;gap:4px;background:${showByDefault?'var(--tl)':'#F1F5F9'};border:1px solid ${showByDefault?T:'var(--bdr)'};border-radius:6px;padding:3px 8px;font-size:10.5px;color:${showByDefault?T:'var(--tx3)'};cursor:pointer;font-family:inherit;transition:all .12s;font-weight:500"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M1 9L4 5L7 7L11 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Chart</button>`:''}
             </div>
-            <div style="height:4px;border-radius:2px;background:#E2E8F0;overflow:hidden;margin-top:6px"><div style="height:100%;border-radius:2px;background:${w?GN:T};width:${pct}%"></div></div>
+            <div style="height:4px;border-radius:2px;background:#E2E8F0;overflow:hidden;margin-top:6px"><div style="height:100%;border-radius:2px;background:${isWinner?GN:isLoser?RD:T};width:${pct}%"></div></div>
           </div>
-          <div style="text-align:right;flex-shrink:0"><div class="m" style="font-size:18px;font-weight:700;color:${w?GN:T}">${pct}¢</div></div>
+          <div style="text-align:right;flex-shrink:0"><div class="m" style="font-size:18px;font-weight:700;color:${isWinner?GN:isLoser?RD:T}">${ocResolved?(ocWon?'YES':'NO'):pct+'¢'}</div></div>
         </div>
         <div class="chart-panel" data-oc="${j}" style="display:${showByDefault&&hasChart?'block':'none'};padding:4px 0 8px;margin:0 4px">
           <div style="background:#FAFBFC;border:1px solid var(--bdr);border-radius:8px;padding:8px;position:relative">
@@ -1590,9 +1683,11 @@ function mountDetail(){
     ${(()=>{
       const isExcl=(m.marketType||'exclusive')==='exclusive';
       const isBinary=m.outcomes.length===2;
-      const showNoBtn=!isExcl||isBinary; // NO only for binary exclusive or any independent
+      const showNoBtn=!isExcl||isBinary;
       const curPrice=m.outcomes[s.selOc]?.price||.5;
-      return m.resolved||S.isGuest?'':`<div style="background:#F8FAFC;border-radius:8px;padding:16px;border:1px solid var(--bdr)">
+      const selOcResolved=m.outcomes[s.selOc]?.resolved;
+      if(m.resolved||S.isGuest||selOcResolved)return selOcResolved?`<div style="background:#F8FAFC;border-radius:8px;padding:16px;border:1px solid var(--bdr);text-align:center;color:var(--tx3);font-size:13px">"${m.outcomes[s.selOc]?.label}" is resolved as <strong style="color:${m.outcomes[s.selOc]?.resolvedYes?GN:RD}">${m.outcomes[s.selOc]?.resolvedYes?'YES':'NO'}</strong>. Select an open outcome to trade.</div>`:'';
+      return`<div style="background:#F8FAFC;border-radius:8px;padding:16px;border:1px solid var(--bdr)">
       <div style="font-size:12px;font-weight:600;color:#334155;margin-bottom:10px">Trading: <span style="color:${T}">${m.outcomes[s.selOc]?.label||''}</span></div>
       ${showNoBtn?`<div style="display:flex;margin-bottom:10px;background:#EEF2F7;border-radius:5px;padding:2px">
         <button class="side-btn" data-side="yes" style="flex:1;padding:7px;border:none;border-radius:4px;cursor:pointer;font-family:'Source Sans 3',sans-serif;font-weight:600;font-size:12.5px;background:${s.side==='yes'?GN:'transparent'};color:${s.side==='yes'?'#fff':'var(--tx3)'}">Buy YES ${Math.round(curPrice*100)}¢</button>
@@ -1688,7 +1783,13 @@ function mountDetail(){
 
   document.getElementById('close-detail').onclick=()=>{S.sel=null;render()};
   document.getElementById('detail-overlay').onclick=e=>{if(e.target===e.currentTarget){S.sel=null;render()}};
-  document.querySelectorAll('.outcome-row').forEach(el=>{el.onclick=()=>{if(!S.sel.resolved){S.selOc=parseInt(el.dataset.idx);S.side='yes';render()}}});
+  document.querySelectorAll('.outcome-row').forEach(el=>{el.onclick=()=>{
+    if(S.sel.resolved)return;
+    const idx=parseInt(el.dataset.idx);
+    const oc=S.sel.outcomes[idx];
+    if(oc&&oc.resolved)return; // Can't trade on resolved independent outcomes
+    S.selOc=idx;S.side='yes';render();
+  }});
   document.querySelectorAll('.chart-toggle').forEach(el=>{
     el.onclick=e=>{
       e.stopPropagation();
@@ -1808,26 +1909,71 @@ function mountEdit(){
 
 function mountResolve(){
   const m=S.resolving;
-  let html=`<div class="overlay" id="resolve-overlay"><div class="modal">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px"><h2 style="font-size:16.5px;font-weight:700">🏁 Resolve Market</h2><button class="xbtn" id="close-resolve">×</button></div>
-    <p style="font-size:13px;font-weight:600;margin-bottom:4px">${m.title}</p>
-    <p style="font-size:12.5px;color:var(--tx3);margin-bottom:18px;line-height:1.5">Select the winner. <strong>Permanent.</strong> Winners get $1/share, losers $0.</p>
-    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:18px">
-      ${m.outcomes.map((o,j)=>`<button class="resolve-btn" data-idx="${j}" style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-radius:8px;border:2px solid var(--bdr);background:#F8FAFC;cursor:pointer;font-family:'Source Sans 3',sans-serif;font-size:14px;font-weight:600;color:var(--tx);transition:all .12s"><span>${o.label}</span><span class="m" style="font-size:14px;color:${T}">${Math.round(o.price*100)}¢</span></button>`).join('')}
-    </div>
-    <div style="border-top:1px solid var(--bdr);padding-top:14px;display:flex;gap:8px">
-      <button class="btn" id="cancel-market-btn" style="background:#FEF3C7;color:#92400E;flex:1;font-size:12px">Cancel (refund all)</button>
-      <button class="btn" id="delete-market-btn" style="background:rgba(239,68,68,.08);color:${RD};flex:1;font-size:12px">Delete Market</button>
-    </div></div></div>`;
-  document.getElementById('app').insertAdjacentHTML('beforeend',html);
-  document.getElementById('close-resolve').onclick=()=>{S.resolving=null;render()};
-  document.getElementById('resolve-overlay').onclick=e=>{if(e.target===e.currentTarget){S.resolving=null;render()}};
-  document.querySelectorAll('.resolve-btn').forEach(el=>{
-    el.onmouseenter=()=>{el.style.borderColor=GN;el.style.background='#F0FDF4'};
-    el.onmouseleave=()=>{el.style.borderColor='var(--bdr)';el.style.background='#F8FAFC'};
-    el.onclick=()=>{if(confirm('Resolve: "'+m.outcomes[parseInt(el.dataset.idx)].label+'" wins?'))resolveMarket(parseInt(el.dataset.idx))}});
-  document.getElementById('cancel-market-btn').onclick=()=>{if(confirm('Cancel and refund all?'))cancelMarket()};
-  document.getElementById('delete-market-btn').onclick=()=>{if(confirm('Permanently delete?'))deleteMarket(m.id)};
+  const isIndep=(m.marketType||'exclusive')==='independent';
+
+  if(isIndep){
+    // Independent: resolve each outcome individually as YES or NO
+    let html=`<div class="overlay" id="resolve-overlay"><div class="modal">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px"><h2 style="font-size:16.5px;font-weight:700">🏁 Resolve Outcomes</h2><button class="xbtn" id="close-resolve">×</button></div>
+      <p style="font-size:13px;font-weight:600;margin-bottom:4px">${m.title}</p>
+      <p style="font-size:12.5px;color:var(--tx3);margin-bottom:18px;line-height:1.5">Resolve each outcome individually. You can resolve some now and others later.</p>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
+        ${m.outcomes.map((o,j)=>{
+          const resolved=o.resolved;
+          const won=o.resolvedYes;
+          return`<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-radius:8px;border:1px solid ${resolved?won?'#BBF7D0':'#FECACA':'var(--bdr)'};background:${resolved?won?'#F0FDF4':'#FEF2F2':'#F8FAFC'}">
+            <div>
+              <span style="font-size:14px;font-weight:600">${o.label}</span>
+              ${resolved?`<span style="margin-left:8px;font-size:11px;font-weight:700;padding:2px 8px;border-radius:3px;background:${won?GN:RD};color:#fff">${won?'YES':'NO'}</span>`:''}
+            </div>
+            ${resolved?'':`<div style="display:flex;gap:6px">
+              <button class="resolve-oc-btn" data-idx="${j}" data-result="yes" style="padding:6px 14px;border-radius:6px;border:2px solid ${GN};background:#F0FDF4;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700;color:${GN};transition:all .12s">✓ YES</button>
+              <button class="resolve-oc-btn" data-idx="${j}" data-result="no" style="padding:6px 14px;border-radius:6px;border:2px solid ${RD};background:#FEF2F2;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700;color:${RD};transition:all .12s">✗ NO</button>
+            </div>`}
+          </div>`}).join('')}
+      </div>
+      <div style="border-top:1px solid var(--bdr);padding-top:14px;display:flex;gap:8px">
+        <button class="btn" id="cancel-market-btn" style="background:#FEF3C7;color:#92400E;flex:1;font-size:12px">Cancel (refund all)</button>
+        <button class="btn" id="delete-market-btn" style="background:rgba(239,68,68,.08);color:${RD};flex:1;font-size:12px">Delete Market</button>
+      </div></div></div>`;
+    document.getElementById('app').insertAdjacentHTML('beforeend',html);
+    document.getElementById('close-resolve').onclick=()=>{S.resolving=null;render()};
+    document.getElementById('resolve-overlay').onclick=e=>{if(e.target===e.currentTarget){S.resolving=null;render()}};
+    document.querySelectorAll('.resolve-oc-btn').forEach(el=>{
+      el.onmouseenter=()=>{el.style.transform='scale(1.05)'};
+      el.onmouseleave=()=>{el.style.transform='scale(1)'};
+      el.onclick=()=>{
+        const idx=parseInt(el.dataset.idx);
+        const result=el.dataset.result;
+        if(confirm('Resolve "'+m.outcomes[idx].label+'" as '+result.toUpperCase()+'?'))
+          resolveIndependentOutcome(idx,result==='yes');
+      };
+    });
+    document.getElementById('cancel-market-btn').onclick=()=>{if(confirm('Cancel and refund all?'))cancelMarket()};
+    document.getElementById('delete-market-btn').onclick=()=>{if(confirm('Permanently delete?'))deleteMarket(m.id)};
+  }else{
+    // Exclusive: pick the one winner
+    let html=`<div class="overlay" id="resolve-overlay"><div class="modal">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px"><h2 style="font-size:16.5px;font-weight:700">🏁 Resolve Market</h2><button class="xbtn" id="close-resolve">×</button></div>
+      <p style="font-size:13px;font-weight:600;margin-bottom:4px">${m.title}</p>
+      <p style="font-size:12.5px;color:var(--tx3);margin-bottom:18px;line-height:1.5">Select the winner. <strong>Permanent.</strong> Pool is split among winners by $ wagered.</p>
+      <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:18px">
+        ${m.outcomes.map((o,j)=>`<button class="resolve-btn" data-idx="${j}" style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-radius:8px;border:2px solid var(--bdr);background:#F8FAFC;cursor:pointer;font-family:'Source Sans 3',sans-serif;font-size:14px;font-weight:600;color:var(--tx);transition:all .12s"><span>${o.label}</span><span class="m" style="font-size:14px;color:${T}">${Math.round(o.price*100)}¢</span></button>`).join('')}
+      </div>
+      <div style="border-top:1px solid var(--bdr);padding-top:14px;display:flex;gap:8px">
+        <button class="btn" id="cancel-market-btn" style="background:#FEF3C7;color:#92400E;flex:1;font-size:12px">Cancel (refund all)</button>
+        <button class="btn" id="delete-market-btn" style="background:rgba(239,68,68,.08);color:${RD};flex:1;font-size:12px">Delete Market</button>
+      </div></div></div>`;
+    document.getElementById('app').insertAdjacentHTML('beforeend',html);
+    document.getElementById('close-resolve').onclick=()=>{S.resolving=null;render()};
+    document.getElementById('resolve-overlay').onclick=e=>{if(e.target===e.currentTarget){S.resolving=null;render()}};
+    document.querySelectorAll('.resolve-btn').forEach(el=>{
+      el.onmouseenter=()=>{el.style.borderColor=GN;el.style.background='#F0FDF4'};
+      el.onmouseleave=()=>{el.style.borderColor='var(--bdr)';el.style.background='#F8FAFC'};
+      el.onclick=()=>{if(confirm('Resolve: "'+m.outcomes[parseInt(el.dataset.idx)].label+'" wins?'))resolveMarket(parseInt(el.dataset.idx))}});
+    document.getElementById('cancel-market-btn').onclick=()=>{if(confirm('Cancel and refund all?'))cancelMarket()};
+    document.getElementById('delete-market-btn').onclick=()=>{if(confirm('Permanently delete?'))deleteMarket(m.id)};
+  }
 }
 
 function bindEvents(){
