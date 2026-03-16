@@ -212,21 +212,75 @@ function initActivityLog(){
 }
 
 // ── Get user stats from trades ──
-// Helper: calculate dollar-weighted payout for a specific trade on a resolved market
+// Helper: calculate dollar-weighted payout for a specific trade
 function calcDollarPayout(trade, market){
-  if(!market.resolved||market.cancelled)return 0;
-  const pool=getMarketPool(market);
-  const winnerIdx=market.winnerIdx;
-  // Collect all winning dollars
-  let totalWinDollars=0;
-  S.trades.filter(t=>t.mid===market.id&&!t.isSell&&t.amount>0).forEach(t=>{
-    const won=(t.side==='yes'&&t.outcomeIdx===winnerIdx)||(t.side==='no'&&t.outcomeIdx!==winnerIdx);
-    if(won)totalWinDollars+=t.amount;
-  });
-  if(totalWinDollars===0)return 0;
-  const won=(trade.side==='yes'&&trade.outcomeIdx===winnerIdx)||(trade.side==='no'&&trade.outcomeIdx!==winnerIdx);
-  if(!won)return 0;
-  return (trade.amount/totalWinDollars)*pool.total;
+  if(market.cancelled)return 0;
+  const isIndep=(market.marketType||'exclusive')==='independent';
+
+  if(isIndep){
+    // Independent: check if THIS outcome is resolved
+    const oc=market.outcomes[trade.outcomeIdx];
+    if(!oc||!oc.resolved)return 0;
+    // Mini-pool: all trades on this specific outcome
+    const ocTrades=S.trades.filter(t=>t.mid===market.id&&t.outcomeIdx===trade.outcomeIdx&&!t.isSell&&t.amount>0);
+    let miniPool=0;
+    ocTrades.forEach(t=>{miniPool+=t.amount});
+    const winningSide=oc.resolvedYes?'yes':'no';
+    let totalWinDollars=0;
+    ocTrades.forEach(t=>{if(t.side===winningSide)totalWinDollars+=t.amount});
+    if(totalWinDollars===0)return 0;
+    if(trade.side!==winningSide)return 0;
+    return (trade.amount/totalWinDollars)*miniPool;
+  }else{
+    // Exclusive: whole market must be resolved
+    if(!market.resolved)return 0;
+    const pool=getMarketPool(market);
+    const winnerIdx=market.winnerIdx;
+    let totalWinDollars=0;
+    S.trades.filter(t=>t.mid===market.id&&!t.isSell&&t.amount>0).forEach(t=>{
+      const won=(t.side==='yes'&&t.outcomeIdx===winnerIdx)||(t.side==='no'&&t.outcomeIdx!==winnerIdx);
+      if(won)totalWinDollars+=t.amount;
+    });
+    if(totalWinDollars===0)return 0;
+    const won=(trade.side==='yes'&&trade.outcomeIdx===winnerIdx)||(trade.side==='no'&&trade.outcomeIdx!==winnerIdx);
+    if(!won)return 0;
+    return (trade.amount/totalWinDollars)*pool.total;
+  }
+}
+
+// Helper: determine trade status for display
+function getTradeStatus(trade, market){
+  if(!market)return{pnl:0,status:'open'};
+  const isIndep=(market.marketType||'exclusive')==='independent';
+
+  if(isIndep){
+    const oc=market.outcomes[trade.outcomeIdx];
+    if(oc&&oc.resolved){
+      const winningSide=oc.resolvedYes?'yes':'no';
+      if(trade.side===winningSide){
+        const payout=calcDollarPayout(trade,market);
+        return{pnl:payout-(trade.amount||0),status:'won'};
+      }else{
+        return{pnl:-(trade.amount||0),status:'lost'};
+      }
+    }
+    // Outcome not yet resolved
+    const price=oc?(trade.side==='yes'?oc.price:(1-oc.price)):0.5;
+    return{pnl:trade.amount>0?(price-0.5)*trade.amount*2:0,status:'open'};
+  }else{
+    if(market.resolved){
+      if(market.cancelled)return{pnl:0,status:'cancelled'};
+      const won=(trade.side==='yes'&&trade.outcomeIdx===market.winnerIdx)||(trade.side==='no'&&trade.outcomeIdx!==market.winnerIdx);
+      if(won){
+        const payout=calcDollarPayout(trade,market);
+        return{pnl:payout-(trade.amount||0),status:'won'};
+      }
+      return{pnl:-(trade.amount||0),status:'lost'};
+    }
+    const price=market.outcomes[trade.outcomeIdx]?
+      (trade.side==='yes'?market.outcomes[trade.outcomeIdx].price:(1-market.outcomes[trade.outcomeIdx].price)):0;
+    return{pnl:trade.amount>0?(price-0.5)*trade.amount*2:0,status:'open'};
+  }
 }
 
 function getUserStats(userName){
@@ -238,26 +292,9 @@ function getUserStats(userName){
   userTrades.forEach(t=>{
     totalVolume+=(t.amount||0);
     const mk=S.markets.find(m=>m.id===t.mid);
-    let pnl=0,status='open';
-    if(mk){
-      if(mk.resolved){
-        const won=(t.side==='yes'&&t.outcomeIdx===mk.winnerIdx)||(t.side==='no'&&t.outcomeIdx!==mk.winnerIdx);
-        if(mk.cancelled){
-          pnl=0;status='cancelled';
-        }else if(won){
-          const payout=calcDollarPayout(t,mk);
-          pnl=payout-(t.amount||0);wins++;status='won';
-        }else{
-          pnl=-(t.amount||0);losses++;status='lost';
-        }
-      }else{
-        // Open positions: estimate P&L from current price
-        const price=mk.outcomes[t.outcomeIdx]?
-          (t.side==='yes'?mk.outcomes[t.outcomeIdx].price:(1-mk.outcomes[t.outcomeIdx].price)):0;
-        pnl=t.amount>0?(price-0.5)*t.amount*2:0; // rough estimate
-        status='open';
-      }
-    }
+    const {pnl,status}=getTradeStatus(t,mk);
+    if(status==='won')wins++;
+    if(status==='lost')losses++;
     totalPnl+=pnl;
     tradeDetails.push({...t,pnl,status,marketTitle:t.title||mk?.title||'Unknown'});
   });
@@ -928,18 +965,10 @@ function getLeagueTable(){
       if(t.isSell)return;
       vol+=Math.abs(t.amount||0);
       const mk=S.markets.find(m=>m.id===t.mid);
-      if(mk){
-        if(mk.resolved&&!mk.cancelled){
-          const won=(t.side==='yes'&&t.outcomeIdx===mk.winnerIdx)||(t.side==='no'&&t.outcomeIdx!==mk.winnerIdx);
-          if(won)w++;else l++;
-        }else if(!mk.resolved&&mk.outcomes[t.outcomeIdx]){
-          // Estimate open value from current price and dollar amount
-          const curPrice=t.side==='yes'?mk.outcomes[t.outcomeIdx].price:(1-mk.outcomes[t.outcomeIdx].price);
-          // If price is above entry (rough 1/n), position is in profit
-          const entryPrice=1/mk.outcomes.length;
-          openValue+=(curPrice-entryPrice)*(t.amount||0)*2;
-        }
-      }
+      const {pnl:tPnl,status}=getTradeStatus(t,mk);
+      if(status==='won')w++;
+      if(status==='lost')l++;
+      if(status==='open') openValue+=tPnl; // tPnl for open is the estimated unrealised P&L
     });
     const portfolioValue=Math.round((bal+openValue)*100)/100;
     const pnl=Math.round((portfolioValue-START_BAL)*100)/100;
@@ -1082,22 +1111,8 @@ function getLeaderboard(){
     if(!map[who])map[who]={name:who,trades:0,volume:0,pnl:0};
     map[who].trades++;map[who].volume+=Math.abs(t.amount||0);
     const mk=S.markets.find(m=>m.id===t.mid);
-    if(mk){
-      if(mk.resolved&&!mk.cancelled){
-        const won=(t.side==='yes'&&t.outcomeIdx===mk.winnerIdx)||(t.side==='no'&&t.outcomeIdx!==mk.winnerIdx);
-        if(won){
-          const payout=calcDollarPayout(t,mk);
-          map[who].pnl+=(payout-(t.amount||0));
-        }else{
-          map[who].pnl+=-(t.amount||0);
-        }
-      }else if(!mk.resolved){
-        // Open: rough estimate from current price
-        const price=mk.outcomes[t.outcomeIdx]?
-          (t.side==='yes'?mk.outcomes[t.outcomeIdx].price:(1-mk.outcomes[t.outcomeIdx].price)):0.5;
-        map[who].pnl+=(t.amount>0?(price-0.5)*t.amount*2:0);
-      }
-    }
+    const {pnl}=getTradeStatus(t,mk);
+    map[who].pnl+=pnl;
   });
   return Object.values(map).sort((a,b)=>b.pnl-a.pnl);
 }
