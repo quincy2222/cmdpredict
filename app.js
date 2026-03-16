@@ -1506,6 +1506,17 @@ function renderAdmin(){
       </div>
     </div>
 
+    <div style="background:linear-gradient(135deg,#EFF6FF,#DBEAFE);border:1px solid #93C5FD;border-radius:10px;padding:16px;margin-bottom:20px">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+        <div>
+          <div style="font-size:13px;font-weight:700;color:#1E40AF;margin-bottom:4px">🔧 Recalculate Past Resolutions</div>
+          <div style="font-size:11.5px;color:#1E3A8A;line-height:1.4">Recalculate all resolved market payouts using dollar-weighted math and adjust balances. Shows preview first.</div>
+        </div>
+        <button class="btn" id="recalc-btn" style="background:#2563EB;color:#fff;padding:8px 16px;font-size:12px;white-space:nowrap">Preview & Fix</button>
+      </div>
+      <div id="recalc-preview" style="margin-top:12px;display:none"></div>
+    </div>
+
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
       <h3 style="font-size:15px;font-weight:700">All Users</h3>
       <button class="btn btn-t" id="admin-add-user-btn" style="padding:5px 12px;font-size:12px">+ Add User</button>
@@ -2057,6 +2068,201 @@ function bindEvents(){
     document.getElementById('start-season-btn').onclick=()=>{const label=prompt('Season name?','Season '+(S.seasons.length+1));if(label!==null)startNewSeason(label)};
   if(document.getElementById('v5-migrate-btn'))
     document.getElementById('v5-migrate-btn').onclick=migrateV5;
+  if(document.getElementById('recalc-btn'))
+    document.getElementById('recalc-btn').onclick=previewRecalc;
+  if(document.getElementById('recalc-apply-btn'))
+    document.getElementById('recalc-apply-btn').onclick=applyRecalc;
+}
+
+// ── RECALCULATE PAST RESOLUTIONS ──
+// Figures out what payouts SHOULD have been (dollar-weighted) vs what was actually paid,
+// then shows a preview and lets admin apply the corrections.
+
+function calcCorrectPayouts(){
+  // For each resolved market, calculate what each user should have received
+  const shouldHaveReceived={}; // user → total correct payouts across all resolved markets
+
+  S.markets.forEach(m=>{
+    if(m.cancelled)return;
+    const isIndep=(m.marketType||'exclusive')==='independent';
+
+    if(isIndep){
+      // Check each individually resolved outcome
+      m.outcomes.forEach((oc,oi)=>{
+        if(!oc.resolved)return;
+        const winningSide=oc.resolvedYes?'yes':'no';
+        const ocTrades=S.trades.filter(t=>t.mid===m.id&&t.outcomeIdx===oi&&!t.isSell&&t.amount>0);
+        let miniPool=0;
+        ocTrades.forEach(t=>{miniPool+=t.amount});
+        let totalWinDollars=0;
+        ocTrades.forEach(t=>{if(t.side===winningSide)totalWinDollars+=t.amount});
+        if(totalWinDollars===0)return;
+        ocTrades.forEach(t=>{
+          if(t.side===winningSide){
+            const payout=(t.amount/totalWinDollars)*miniPool;
+            if(!shouldHaveReceived[t.who])shouldHaveReceived[t.who]=0;
+            shouldHaveReceived[t.who]+=payout;
+          }
+        });
+      });
+    }else{
+      if(!m.resolved)return;
+      const winnerIdx=m.winnerIdx;
+      if(winnerIdx==null)return;
+      const pool=getMarketPool(m);
+      const totalPool=pool.total;
+      let totalWinDollars=0;
+      const trades=S.trades.filter(t=>t.mid===m.id&&!t.isSell&&t.amount>0);
+      trades.forEach(t=>{
+        const won=(t.side==='yes'&&t.outcomeIdx===winnerIdx)||(t.side==='no'&&t.outcomeIdx!==winnerIdx);
+        if(won)totalWinDollars+=t.amount;
+      });
+      if(totalWinDollars===0)return;
+      trades.forEach(t=>{
+        const won=(t.side==='yes'&&t.outcomeIdx===winnerIdx)||(t.side==='no'&&t.outcomeIdx!==winnerIdx);
+        if(won){
+          const payout=(t.amount/totalWinDollars)*totalPool;
+          if(!shouldHaveReceived[t.who])shouldHaveReceived[t.who]=0;
+          shouldHaveReceived[t.who]+=payout;
+        }
+      });
+    }
+  });
+
+  return shouldHaveReceived;
+}
+
+function previewRecalc(){
+  const shouldHave=calcCorrectPayouts();
+
+  // What each user's balance SHOULD be:
+  // Start with START_BAL, subtract all bets, add correct payouts
+  const correctBalance={};
+  ANALYSTS.forEach(name=>{correctBalance[name]=START_BAL});
+  // Also include non-analyst users like 'admin'
+  Object.values(S.users).forEach(u=>{
+    if(!correctBalance[u.name])correctBalance[u.name]=START_BAL;
+  });
+
+  // Subtract all bets (money out)
+  S.trades.forEach(t=>{
+    if(t.isSell)return;
+    const who=canonicalName(t.who);
+    if(!correctBalance[who])correctBalance[who]=START_BAL;
+    correctBalance[who]-=(t.amount||0);
+  });
+
+  // Add sell proceeds back
+  S.trades.forEach(t=>{
+    if(!t.isSell)return;
+    const who=canonicalName(t.who);
+    if(!correctBalance[who])correctBalance[who]=START_BAL;
+    correctBalance[who]+=Math.abs(t.amount||0); // sell amounts are negative, so abs
+  });
+
+  // Add correct payouts
+  Object.entries(shouldHave).forEach(([who,amt])=>{
+    const canonical=canonicalName(who);
+    if(!correctBalance[canonical])correctBalance[canonical]=START_BAL;
+    correctBalance[canonical]+=amt;
+  });
+
+  // Compare to actual current balances
+  const adjustments=[];
+  Object.entries(correctBalance).forEach(([name,correct])=>{
+    const key=encodeKey(name);
+    const current=S.users[key]?S.users[key].balance:(S.users[name]?S.users[name].balance:null);
+    if(current===null)return;
+    const diff=Math.round((correct-current)*100)/100;
+    adjustments.push({name,current:Math.round(current*100)/100,correct:Math.round(correct*100)/100,diff});
+  });
+
+  adjustments.sort((a,b)=>Math.abs(b.diff)-Math.abs(a.diff));
+
+  // Render preview
+  const previewEl=document.getElementById('recalc-preview');
+  if(!previewEl)return;
+  previewEl.style.display='block';
+  previewEl.innerHTML=`
+    <div style="background:#fff;border:1px solid #93C5FD;border-radius:8px;overflow:hidden;margin-bottom:12px">
+      <div style="display:grid;grid-template-columns:1fr 80px 80px 80px;padding:8px 12px;border-bottom:1px solid #DBEAFE;font-size:9.5px;color:#1E3A8A;text-transform:uppercase;letter-spacing:.5px;font-weight:600">
+        <span>User</span><span style="text-align:right">Current</span><span style="text-align:right">Correct</span><span style="text-align:right">Adjust</span>
+      </div>
+      ${adjustments.map(a=>`<div style="display:grid;grid-template-columns:1fr 80px 80px 80px;padding:8px 12px;border-bottom:1px solid #EFF6FF;font-size:12px;align-items:center;${Math.abs(a.diff)>1?'':'opacity:.5'}">
+        <span style="font-weight:600">${a.name}</span>
+        <span class="m" style="text-align:right">$${a.current.toLocaleString()}</span>
+        <span class="m" style="text-align:right;color:${T}">$${a.correct.toLocaleString()}</span>
+        <span class="m" style="text-align:right;font-weight:700;color:${a.diff>0?GN:a.diff<0?RD:'var(--tx3)'}">${a.diff>0?'+':''}$${a.diff.toLocaleString()}</span>
+      </div>`).join('')}
+    </div>
+    ${adjustments.some(a=>Math.abs(a.diff)>1)?`<button class="btn" id="recalc-apply-btn" style="background:${GN};color:#fff;padding:10px 20px;font-size:13px;width:100%">Apply Corrections</button>`:`<div style="text-align:center;color:${GN};font-size:13px;font-weight:600;padding:8px">✅ All balances are correct — no adjustments needed.</div>`}
+  `;
+
+  // Re-bind the apply button since we just rendered it
+  if(document.getElementById('recalc-apply-btn'))
+    document.getElementById('recalc-apply-btn').onclick=applyRecalc;
+}
+
+function applyRecalc(){
+  if(!confirm('Apply balance corrections to all users? This will adjust balances to match correct dollar-weighted payouts.'))return;
+
+  const shouldHave=calcCorrectPayouts();
+
+  // Recalculate correct balances (same logic as preview)
+  const correctBalance={};
+  ANALYSTS.forEach(name=>{correctBalance[name]=START_BAL});
+  Object.values(S.users).forEach(u=>{if(!correctBalance[u.name])correctBalance[u.name]=START_BAL});
+  S.trades.forEach(t=>{
+    if(t.isSell)return;
+    const who=canonicalName(t.who);
+    if(!correctBalance[who])correctBalance[who]=START_BAL;
+    correctBalance[who]-=(t.amount||0);
+  });
+  S.trades.forEach(t=>{
+    if(!t.isSell)return;
+    const who=canonicalName(t.who);
+    if(!correctBalance[who])correctBalance[who]=START_BAL;
+    correctBalance[who]+=Math.abs(t.amount||0);
+  });
+  Object.entries(shouldHave).forEach(([who,amt])=>{
+    const canonical=canonicalName(who);
+    if(!correctBalance[canonical])correctBalance[canonical]=START_BAL;
+    correctBalance[canonical]+=amt;
+  });
+
+  // Apply to each user
+  let changes=[];
+  Object.entries(correctBalance).forEach(([name,correct])=>{
+    const key=encodeKey(name);
+    const rounded=Math.round(correct*100)/100;
+    const current=S.users[key]?S.users[key].balance:null;
+    if(current===null)return;
+    const diff=Math.round((rounded-current)*100)/100;
+    if(Math.abs(diff)<0.01)return;
+
+    if(useFirebase){
+      db.ref('users/'+key).once('value',snap=>{
+        const u=snap.val()||{name,balance:START_BAL};
+        u.balance=rounded;
+        db.ref('users/'+key).set(u);
+      });
+    }else{
+      const u=S.users[key]||{name,balance:START_BAL};
+      u.balance=rounded;
+      S.users[key]=u;
+    }
+    if(name.toLowerCase()===S.name.toLowerCase()){
+      S.portfolio.balance=rounded;
+      savePortfolio();
+    }
+    changes.push(`${name}: ${diff>0?'+':''}$${diff}`);
+  });
+
+  if(!useFirebase)localStorage.setItem('cmdp_users',JSON.stringify(S.users));
+
+  logActivity({type:'admin_recalc',user:S.name,desc:`🔧 ${S.name} recalculated past resolutions — ${changes.length} balance adjustments`});
+  flash(`Corrections applied! ${changes.length} balances adjusted.`);
+  render();
 }
 
 // ── V5 MIGRATION: reset balances, wipe trades, keep markets ──
