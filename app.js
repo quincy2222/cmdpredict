@@ -512,7 +512,11 @@ function createMarket(){
 function trade(){
   const a=parseFloat(S.amt);
   if(!a||a<=0){flash("Enter a valid amount","err");return}
-  if(a>S.portfolio.balance){flash("Insufficient balance","err");return}
+  // Check balance against Firebase (source of truth), not just localStorage
+  const key=encodeKey(S.name);
+  const fbBal=S.users[key]?S.users[key].balance:S.portfolio.balance;
+  const checkBal=Math.min(S.portfolio.balance, fbBal); // Use the LOWER of the two
+  if(a>checkBal){flash("Insufficient balance ($"+checkBal.toFixed(2)+" available)","err");return}
   if(S.sel.resolved){flash("Market is resolved","err");return}
   const oc=S.sel.outcomes[S.selOc];
   const isExcl=(S.sel.marketType||'exclusive')==='exclusive';
@@ -523,7 +527,7 @@ function trade(){
   const rec={id:Date.now(),mid:S.sel.id,outcomeIdx:S.selOc,outcomeLabel:oc.label,
     side:effectiveSide,shares,avg:avgPrice,title:S.sel.title,who:S.name,amount:a,ts:Date.now()};
   saveTrade(rec);
-  S.portfolio.balance=Math.round((S.portfolio.balance-a)*100)/100;
+  S.portfolio.balance=Math.round((checkBal-a)*100)/100;
   S.portfolio.positions.push(rec);savePortfolio();
   S.markets=S.markets.map(m=>m.id!==S.sel.id?m:updated);saveMarkets(S.markets);
   S.sel=updated;S.amt='';
@@ -2144,7 +2148,7 @@ function previewRecalc(){
   const shouldHave=calcCorrectPayouts();
 
   // What each user's balance SHOULD be:
-  // Start with START_BAL, subtract all bets, add correct payouts
+  // Start with START_BAL, subtract all bets, add sell proceeds, add correct payouts, add admin top-ups
   const correctBalance={};
   ANALYSTS.forEach(name=>{correctBalance[name]=START_BAL});
   // Also include non-analyst users like 'admin'
@@ -2168,37 +2172,51 @@ function previewRecalc(){
     correctBalance[who]+=Math.abs(t.amount||0); // sell amounts are negative, so abs
   });
 
-  // Add correct payouts
+  // Add correct payouts from resolved markets
   Object.entries(shouldHave).forEach(([who,amt])=>{
     const canonical=canonicalName(who);
     if(!correctBalance[canonical])correctBalance[canonical]=START_BAL;
     correctBalance[canonical]+=amt;
   });
 
-  // Add admin top-ups and fund additions from payouts table
-  if(S.trades){
-    // Check payouts for TOP-UP entries (admin add funds)
-    const payoutsRef=useFirebase?null:null;
-    // We need to scan the payouts node — but it's not in S directly
-    // Instead, scan activity log for admin_funds events
-    activityLog.forEach(a=>{
-      if(a.type==='admin_funds'&&a.target&&a.amount){
-        const canonical=canonicalName(a.target);
-        if(!correctBalance[canonical])correctBalance[canonical]=START_BAL;
-        correctBalance[canonical]+=a.amount;
-      }
-    });
-  }
-  const adjustments=[];
-  Object.entries(correctBalance).forEach(([name,correct])=>{
-    const key=encodeKey(name);
-    const current=S.users[key]?S.users[key].balance:(S.users[name]?S.users[name].balance:null);
-    if(current===null)return;
-    const diff=Math.round((correct-current)*100)/100;
-    adjustments.push({name,current:Math.round(current*100)/100,correct:Math.round(correct*100)/100,diff});
+  // Add admin top-ups from activity log
+  activityLog.forEach(a=>{
+    if(a.type==='admin_funds'&&a.target&&a.amount){
+      const canonical=canonicalName(a.target);
+      if(!correctBalance[canonical])correctBalance[canonical]=START_BAL;
+      correctBalance[canonical]+=a.amount;
+    }
   });
 
-  adjustments.sort((a,b)=>Math.abs(b.diff)-Math.abs(a.diff));
+  // Also scan payouts node for TOP-UP entries (in case activity log is incomplete)
+  const scanPayoutsAndShow=function(payoutsData){
+    if(payoutsData){
+      Object.values(payoutsData).forEach(p=>{
+        if(p.winner==='TOP-UP'&&p.who&&p.amount){
+          const canonical=canonicalName(p.who);
+          // Check if this top-up is already counted via activity log
+          const alreadyCounted=activityLog.some(a=>
+            a.type==='admin_funds'&&canonicalName(a.target)===canonical&&Math.abs(a.amount-p.amount)<0.01&&Math.abs((a.ts||0)-(p.ts||0))<5000
+          );
+          if(!alreadyCounted){
+            if(!correctBalance[canonical])correctBalance[canonical]=START_BAL;
+            correctBalance[canonical]+=p.amount;
+          }
+        }
+      });
+    }
+
+    // Compare to actual current balances
+    const adjustments=[];
+    Object.entries(correctBalance).forEach(([name,correct])=>{
+      const key=encodeKey(name);
+      const current=S.users[key]?S.users[key].balance:(S.users[name]?S.users[name].balance:null);
+      if(current===null)return;
+      const diff=Math.round((correct-current)*100)/100;
+      adjustments.push({name,current:Math.round(current*100)/100,correct:Math.round(correct*100)/100,diff});
+    });
+
+    adjustments.sort((a,b)=>Math.abs(b.diff)-Math.abs(a.diff));
 
   // Render preview
   const previewEl=document.getElementById('recalc-preview');
@@ -2222,6 +2240,16 @@ function previewRecalc(){
   // Re-bind the apply button since we just rendered it
   if(document.getElementById('recalc-apply-btn'))
     document.getElementById('recalc-apply-btn').onclick=applyRecalc;
+  }; // end scanPayoutsAndShow
+
+  // Fetch payouts from Firebase to find TOP-UP entries
+  if(useFirebase){
+    db.ref('payouts').once('value',snap=>{
+      scanPayoutsAndShow(snap.val());
+    });
+  }else{
+    scanPayoutsAndShow(null);
+  }
 }
 
 function applyRecalc(){
@@ -2260,7 +2288,24 @@ function applyRecalc(){
     }
   });
 
-  // Apply to each user
+  function doApply(payoutsData){
+    // Also add TOP-UP entries from payouts node
+    if(payoutsData){
+      Object.values(payoutsData).forEach(p=>{
+        if(p.winner==='TOP-UP'&&p.who&&p.amount){
+          const canonical=canonicalName(p.who);
+          const alreadyCounted=activityLog.some(a=>
+            a.type==='admin_funds'&&canonicalName(a.target)===canonical&&Math.abs(a.amount-p.amount)<0.01&&Math.abs((a.ts||0)-(p.ts||0))<5000
+          );
+          if(!alreadyCounted){
+            if(!correctBalance[canonical])correctBalance[canonical]=START_BAL;
+            correctBalance[canonical]+=p.amount;
+          }
+        }
+      });
+    }
+
+    // Apply to each user
   let changes=[];
   Object.entries(correctBalance).forEach(([name,correct])=>{
     const key=encodeKey(name);
@@ -2293,6 +2338,16 @@ function applyRecalc(){
   logActivity({type:'admin_recalc',user:S.name,desc:`🔧 ${S.name} recalculated past resolutions — ${changes.length} balance adjustments`});
   flash(`Corrections applied! ${changes.length} balances adjusted.`);
   render();
+  } // end doApply
+
+  // Fetch payouts from Firebase for TOP-UP entries
+  if(useFirebase){
+    db.ref('payouts').once('value',snap=>{
+      doApply(snap.val());
+    });
+  }else{
+    doApply(null);
+  }
 }
 
 // ── V5 MIGRATION: reset balances, wipe trades, keep markets ──
