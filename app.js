@@ -1709,7 +1709,7 @@ function mountDetail(){
     ${(()=>{
       const isExcl=(m.marketType||'exclusive')==='exclusive';
       const isBinary=m.outcomes.length===2;
-      const showNoBtn=!isExcl||isBinary;
+      const showNoBtn = !isExcl; // Only show YES/NO for independent markets
       const curPrice=m.outcomes[s.selOc]?.price||.5;
       const selOcResolved=m.outcomes[s.selOc]?.resolved;
       if(m.resolved||S.isGuest||selOcResolved)return selOcResolved?`<div style="background:#F8FAFC;border-radius:8px;padding:16px;border:1px solid var(--bdr);text-align:center;color:var(--tx3);font-size:13px">"${m.outcomes[s.selOc]?.label}" is resolved as <strong style="color:${m.outcomes[s.selOc]?.resolvedYes?GN:RD}">${m.outcomes[s.selOc]?.resolvedYes?'YES':'NO'}</strong>. Select an open outcome to trade.</div>`:'';
@@ -1756,8 +1756,7 @@ function mountDetail(){
     const noAllowed=!isExcl||isBinary;
 
     // Force YES for exclusive multi-outcome
-    if(isExcl&&!isBinary) S.side='yes';
-
+    if(isExcl) S.side = 'yes';
     if(a>0&&m.outcomes[s.selOc]){
       const pool=getMarketPool(m);
       const totalPool=pool.total+a;
