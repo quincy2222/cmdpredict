@@ -139,22 +139,25 @@ async function init(){
       m.outcomes.forEach(o=>{o.pool=0});
 
       // Replay each trade on this market using LMSR
+      // NOTE: For exclusive markets, all old NO-side trades are treated as YES-side
+      // because the NO side should never have existed on exclusive markets.
+      // A "NO" bet on outcome X in exclusive context was conceptually a bet FOR other outcomes,
+      // but it caused pool corruption. We replay them as YES to get clean pools.
       const mTrades=S.trades.filter(t=>t.mid===m.id&&!t.isSell).sort((a,b)=>a.ts-b.ts);
       const b=50;
       mTrades.forEach(t=>{
+        const side='yes'; // Force YES for exclusive market replay
         let lo=0,hi=(t.amount||0)*20;
         for(let iter=0;iter<60;iter++){
           const mid2=(lo+hi)/2;
           const before=m.outcomes.map(o=>o.pool||0);
           const after=[...before];
-          const dir=t.side==='yes'?1:-1;
-          after[t.outcomeIdx]+=dir*mid2;
+          after[t.outcomeIdx]+=mid2;
           function logSumExp(qs){const mx=Math.max(...qs);return mx+Math.log(qs.reduce((a2,q)=>a2+Math.exp((q-mx)/b),0))}
           const cost=Math.abs(b*logSumExp(after)-b*logSumExp(before));
           if(cost<t.amount) lo=mid2; else hi=mid2;
         }
-        const dir=t.side==='yes'?1:-1;
-        m.outcomes[t.outcomeIdx].pool=(m.outcomes[t.outcomeIdx].pool||0)+dir*lo;
+        m.outcomes[t.outcomeIdx].pool=(m.outcomes[t.outcomeIdx].pool||0)+lo;
       });
 
       // Recalculate prices
@@ -362,17 +365,20 @@ function cpmmBuy(market, oi, side, amount){
   const isExclusive=(m.marketType||'exclusive')==='exclusive';
   const b=getB(m);
 
+  // Safeguard: force YES for exclusive markets (NO side is only for independent)
+  const effectiveSide=isExclusive?'yes':side;
+
   let lo=0,hi=amount*20;
   for(let iter=0;iter<60;iter++){
     const mid=(lo+hi)/2;
     const cost=isExclusive
-      ?lmsrCost(m.outcomes, oi, mid, side, b)
-      :sigmoidCost(m.outcomes[oi].pool||0, mid, side, b);
+      ?lmsrCost(m.outcomes, oi, mid, effectiveSide, b)
+      :sigmoidCost(m.outcomes[oi].pool||0, mid, effectiveSide, b);
     if(cost<amount) lo=mid; else hi=mid;
   }
   const shares=Math.round(lo*100)/100;
 
-  const dir=side==='yes'?1:-1;
+  const dir=effectiveSide==='yes'?1:-1;
   m.outcomes[oi].pool=(m.outcomes[oi].pool||0)+dir*shares;
 
   if(isExclusive){
@@ -509,19 +515,21 @@ function trade(){
   if(a>S.portfolio.balance){flash("Insufficient balance","err");return}
   if(S.sel.resolved){flash("Market is resolved","err");return}
   const oc=S.sel.outcomes[S.selOc];
-  const result=cpmmBuy(S.sel,S.selOc,S.side,a);
+  const isExcl=(S.sel.marketType||'exclusive')==='exclusive';
+  const effectiveSide=isExcl?'yes':S.side; // Force YES for exclusive markets
+  const result=cpmmBuy(S.sel,S.selOc,effectiveSide,a);
   const updated=result.market, shares=result.shares, avgPrice=result.avgPrice;
   if(shares<=0){flash("Trade too small","err");return}
   const rec={id:Date.now(),mid:S.sel.id,outcomeIdx:S.selOc,outcomeLabel:oc.label,
-    side:S.side,shares,avg:avgPrice,title:S.sel.title,who:S.name,amount:a,ts:Date.now()};
+    side:effectiveSide,shares,avg:avgPrice,title:S.sel.title,who:S.name,amount:a,ts:Date.now()};
   saveTrade(rec);
   S.portfolio.balance=Math.round((S.portfolio.balance-a)*100)/100;
   S.portfolio.positions.push(rec);savePortfolio();
   S.markets=S.markets.map(m=>m.id!==S.sel.id?m:updated);saveMarkets(S.markets);
   S.sel=updated;S.amt='';
-  logActivity({type:'trade',user:S.name,marketId:S.sel.id,amount:a,side:S.side,outcome:oc.label,
-    desc:`${S.name} bought ${shares} ${S.side.toUpperCase()} "${oc.label}" at ${Math.round(avgPrice*100)}¢ for $${a}`});
-  flash(`Bought ${shares} ${S.side.toUpperCase()} "${oc.label}" at ${Math.round(avgPrice*100)}¢`);
+  logActivity({type:'trade',user:S.name,marketId:S.sel.id,amount:a,side:effectiveSide,outcome:oc.label,
+    desc:`${S.name} bought ${shares} ${effectiveSide.toUpperCase()} "${oc.label}" at ${Math.round(avgPrice*100)}¢ for $${a}`});
+  flash(`Bought ${shares} ${effectiveSide.toUpperCase()} "${oc.label}" at ${Math.round(avgPrice*100)}¢`);
 }
 
 function sellPosition(posIdx){
@@ -1709,7 +1717,7 @@ function mountDetail(){
     ${(()=>{
       const isExcl=(m.marketType||'exclusive')==='exclusive';
       const isBinary=m.outcomes.length===2;
-      const showNoBtn = !isExcl; // Only show YES/NO for independent markets
+      const showNoBtn=!isExcl; // Only independent markets have YES/NO sides
       const curPrice=m.outcomes[s.selOc]?.price||.5;
       const selOcResolved=m.outcomes[s.selOc]?.resolved;
       if(m.resolved||S.isGuest||selOcResolved)return selOcResolved?`<div style="background:#F8FAFC;border-radius:8px;padding:16px;border:1px solid var(--bdr);text-align:center;color:var(--tx3);font-size:13px">"${m.outcomes[s.selOc]?.label}" is resolved as <strong style="color:${m.outcomes[s.selOc]?.resolvedYes?GN:RD}">${m.outcomes[s.selOc]?.resolvedYes?'YES':'NO'}</strong>. Select an open outcome to trade.</div>`:'';
@@ -1753,10 +1761,11 @@ function mountDetail(){
     S.amt=amtInput?.value||'';
     const isExcl=(m.marketType||'exclusive')==='exclusive';
     const isBinary=m.outcomes.length===2;
-    const noAllowed=!isExcl||isBinary;
+    const noAllowed=!isExcl; // Only independent markets allow NO bets
 
     // Force YES for exclusive multi-outcome
-    if(isExcl) S.side = 'yes';
+    if(isExcl) S.side='yes';
+
     if(a>0&&m.outcomes[s.selOc]){
       const pool=getMarketPool(m);
       const totalPool=pool.total+a;
@@ -2166,7 +2175,20 @@ function previewRecalc(){
     correctBalance[canonical]+=amt;
   });
 
-  // Compare to actual current balances
+  // Add admin top-ups and fund additions from payouts table
+  if(S.trades){
+    // Check payouts for TOP-UP entries (admin add funds)
+    const payoutsRef=useFirebase?null:null;
+    // We need to scan the payouts node — but it's not in S directly
+    // Instead, scan activity log for admin_funds events
+    activityLog.forEach(a=>{
+      if(a.type==='admin_funds'&&a.target&&a.amount){
+        const canonical=canonicalName(a.target);
+        if(!correctBalance[canonical])correctBalance[canonical]=START_BAL;
+        correctBalance[canonical]+=a.amount;
+      }
+    });
+  }
   const adjustments=[];
   Object.entries(correctBalance).forEach(([name,correct])=>{
     const key=encodeKey(name);
@@ -2227,6 +2249,15 @@ function applyRecalc(){
     const canonical=canonicalName(who);
     if(!correctBalance[canonical])correctBalance[canonical]=START_BAL;
     correctBalance[canonical]+=amt;
+  });
+
+  // Add admin top-ups from activity log
+  activityLog.forEach(a=>{
+    if(a.type==='admin_funds'&&a.target&&a.amount){
+      const canonical=canonicalName(a.target);
+      if(!correctBalance[canonical])correctBalance[canonical]=START_BAL;
+      correctBalance[canonical]+=a.amount;
+    }
   });
 
   // Apply to each user
